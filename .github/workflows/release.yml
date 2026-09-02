@@ -49,6 +49,26 @@ jobs:
           git commit -m "chore: update Cargo.lock for release" || exit 0
           git push
 
+  publish-crates:
+    name: "Publish to crates.io"
+    needs: release-please
+    if: ${{ needs.release-please.outputs.releases_created == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Publish
+        run: cargo publish --trusted-publishing always
+
   build-release:
     name: "Build ${{ matrix.target }}"
     needs: release-please

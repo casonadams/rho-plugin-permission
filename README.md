@@ -26,6 +26,17 @@ path = "/Users/you/.config/rho/plugins/rho-plugin-permission"   # absolute: ~ is
 enabled = true
 ```
 
+Or `cargo install rho-plugin-permission` from
+[crates.io](https://crates.io/crates/rho-plugin-permission) and register it by
+command instead of path:
+
+```toml
+# ~/.config/rho/config.toml
+[plugins.permission]
+command = "rho-plugin-permission"
+enabled = true
+```
+
 `rho plugin install <crate>` is still a stub in rho; manual config for now.
 
 ## Configuration
