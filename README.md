@@ -7,12 +7,14 @@ for everything else.
 ## Install
 
 Download a prebuilt binary from the
-[releases page](https://github.com/casonadams/rho-plugin-permission/releases)
-and save it to `~/.config/rho/plugins/`:
+[releases page](https://github.com/casonadams/rho-plugin-permission/releases),
+make it executable, and save it to `~/.config/rho/plugins/`:
 
 ```sh
 mkdir -p ~/.config/rho/plugins
-tar xzf rho-plugin-permission-*-aarch64-apple-darwin.tar.gz -C ~/.config/rho/plugins
+curl -LO https://github.com/casonadams/rho-plugin-permission/releases/latest/download/rho-plugin-permission-aarch64-apple-darwin
+chmod +x rho-plugin-permission-aarch64-apple-darwin
+mv rho-plugin-permission-aarch64-apple-darwin ~/.config/rho/plugins/
 ```
 
 Or build from source in this repo with `cargo build --release` and point `path`

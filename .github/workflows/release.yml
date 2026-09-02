@@ -66,8 +66,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Exchange OIDC token for a short-lived publish token
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+
       - name: Publish
-        run: cargo publish --trusted-publishing always
+        run: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
   build-release:
     name: "Build ${{ matrix.target }}"
@@ -106,21 +112,15 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Package and upload
+      - name: Upload binary
         if: runner.os != 'Windows'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          name="rho-plugin-permission-${TAG#v}-${{ matrix.target }}"
-          tar czf "$name.tar.gz" -C "target/${{ matrix.target }}/release" rho-plugin-permission
-          gh release upload "$TAG" "$name.tar.gz" --clobber
+        run: gh release upload "$TAG" "target/${{ matrix.target }}/release/rho-plugin-permission" --clobber
 
-      - name: Package and upload (Windows)
+      - name: Upload binary (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          $name = "rho-plugin-permission-$($env:TAG.Substring(1))-${{ matrix.target }}"
-          Compress-Archive -Path "target/${{ matrix.target }}/release/rho-plugin-permission.exe" -DestinationPath "$name.zip"
-          gh release upload $env:TAG "$name.zip" --clobber
+        run: gh release upload $env:TAG "target/${{ matrix.target }}/release/rho-plugin-permission.exe" --clobber
