@@ -55,6 +55,13 @@ pub enum Decision {
     Ask,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct EvalRequest<'a> {
+    pub tool: &'a str,
+    pub args: &'a Value,
+    pub working_dir: Option<&'a Path>,
+}
+
 impl PermissionConfig {
     /// A missing or malformed file means "no rules": every call asks.
     pub fn load() -> Self {
@@ -64,15 +71,16 @@ impl PermissionConfig {
             .unwrap_or_default()
     }
 
-    pub fn evaluate(&self, tool: &str, args: &Value, working_dir: Option<&Path>) -> Decision {
-        let input = match_input(args);
-        self.decide(tool, &input, working_dir)
+    pub fn evaluate(&self, req: EvalRequest<'_>) -> Decision {
+        let input = match_input(req.args);
+        self.decide((req.tool, &input), req.working_dir)
     }
 
     /// Order: deny, then the workspace-escape ask, then explicit ask rules,
     /// then allow. `working_dir` None (cwd unavailable) fails closed: path
     /// tools always ask.
-    fn decide(&self, tool: &str, input: &str, working_dir: Option<&Path>) -> Decision {
+    fn decide(&self, target: (&str, &str), working_dir: Option<&Path>) -> Decision {
+        let (tool, input) = target;
         let segments = command_segments(tool, input);
         if let Some(pattern) = first_match(&self.deny, tool, &segments) {
             return Decision::Deny(format!("denied by permission rule '{tool}|{pattern}'"));

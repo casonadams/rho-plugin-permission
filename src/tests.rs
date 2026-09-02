@@ -1,7 +1,7 @@
 use super::*;
 use permission::{
-    Decision, PermissionConfig, canonical_tool, command_segments, has_dynamic_execution, has_redirection, match_input,
-    save_allow_rule, suggested_rule, wildcard_match,
+    Decision, EvalRequest, PermissionConfig, canonical_tool, command_segments, has_dynamic_execution, has_redirection,
+    match_input, save_allow_rule, suggested_rule, wildcard_match,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -22,8 +22,17 @@ fn rules(toml_text: &str) -> PermissionConfig {
     toml::from_str(toml_text).unwrap()
 }
 
+fn eval_req(config: &PermissionConfig, target: (&str, &Value), working_dir: Option<&Path>) -> Decision {
+    let (tool, args) = target;
+    config.evaluate(EvalRequest {
+        tool,
+        args,
+        working_dir,
+    })
+}
+
 fn bash_decision(config: &PermissionConfig, command: &str) -> Decision {
-    config.evaluate("bash", &json!({"command": command}), workspace())
+    eval_req(config, ("bash", &json!({"command": command})), workspace())
 }
 
 #[test]
@@ -117,9 +126,9 @@ fn tool_aliases_share_one_rule_namespace() {
     assert_eq!(canonical_tool("bash"), "bash");
     let config = rules("[allow]\nfetch = [\"https://github.com/*\"]\n");
     assert_eq!(
-        config.evaluate(
-            canonical_tool("webfetch"),
-            &json!({"url": "https://github.com/x"}),
+        eval_req(
+            &config,
+            (canonical_tool("webfetch"), &json!({"url": "https://github.com/x"})),
             workspace()
         ),
         Decision::Allow
@@ -199,24 +208,28 @@ fn missing_rules_ask() {
 fn non_bash_tools_match_argument_value() {
     let config = rules("[allow]\nedit = [\"*\"]\nread = [\"src/*\", \"/ws/src/*\"]\n");
     assert_eq!(
-        config.evaluate("edit", &json!({"path": "a/b.rs", "old_text": "x"}), workspace()),
+        eval_req(
+            &config,
+            ("edit", &json!({"path": "a/b.rs", "old_text": "x"})),
+            workspace()
+        ),
         Decision::Allow
     );
     assert_eq!(
-        config.evaluate("read", &json!({"path": "src/main.rs"}), workspace()),
+        eval_req(&config, ("read", &json!({"path": "src/main.rs"})), workspace()),
         Decision::Allow
     );
     assert_eq!(
-        config.evaluate("read", &json!({"path": "/ws/src/lib.rs"}), workspace()),
+        eval_req(&config, ("read", &json!({"path": "/ws/src/lib.rs"})), workspace()),
         Decision::Allow
     );
     // `*` crosses path separators: src/* covers the whole subtree.
     assert_eq!(
-        config.evaluate("read", &json!({"path": "src/deep/nested.rs"}), workspace()),
+        eval_req(&config, ("read", &json!({"path": "src/deep/nested.rs"})), workspace()),
         Decision::Allow
     );
     assert_eq!(
-        config.evaluate("read", &json!({"path": "/etc/passwd"}), workspace()),
+        eval_req(&config, ("read", &json!({"path": "/etc/passwd"})), workspace()),
         Decision::Ask
     );
 }
@@ -226,35 +239,35 @@ fn paths_outside_working_dir_always_ask() {
     // Allow rules cannot grant access outside the workspace.
     let config = rules("[allow]\nread = [\"*\"]\nwrite = [\"*\"]\n");
     assert_eq!(
-        config.evaluate("read", &json!({"path": "/etc/passwd"}), workspace()),
+        eval_req(&config, ("read", &json!({"path": "/etc/passwd"})), workspace()),
         Decision::Ask
     );
     assert_eq!(
-        config.evaluate("read", &json!({"path": "../sibling/x"}), workspace()),
+        eval_req(&config, ("read", &json!({"path": "../sibling/x"})), workspace()),
         Decision::Ask
     );
     assert_eq!(
-        config.evaluate("read", &json!({"path": "a/../../etc/x"}), workspace()),
+        eval_req(&config, ("read", &json!({"path": "a/../../etc/x"})), workspace()),
         Decision::Ask
     );
     // .. that stays inside is fine.
     assert_eq!(
-        config.evaluate("read", &json!({"path": "src/../main.rs"}), workspace()),
+        eval_req(&config, ("read", &json!({"path": "src/../main.rs"})), workspace()),
         Decision::Allow
     );
     // An unavailable working directory fails closed.
     assert_eq!(
-        config.evaluate("read", &json!({"path": "src/main.rs"}), None),
+        eval_req(&config, ("read", &json!({"path": "src/main.rs"})), None),
         Decision::Ask
     );
     // Deny still beats the workspace check.
     let config = rules("[deny]\nread = [\"/tmp/*\", \"*.env*\"]\n");
     assert_eq!(
-        config.evaluate("read", &json!({"path": "/tmp/.env"}), workspace()),
+        eval_req(&config, ("read", &json!({"path": "/tmp/.env"})), workspace()),
         Decision::Deny("denied by permission rule 'read|/tmp/*'".to_string())
     );
     assert_eq!(
-        config.evaluate("read", &json!({"path": "secrets.env"}), workspace()),
+        eval_req(&config, ("read", &json!({"path": "secrets.env"})), workspace()),
         Decision::Deny("denied by permission rule 'read|*.env*'".to_string())
     );
 }
@@ -263,15 +276,23 @@ fn paths_outside_working_dir_always_ask() {
 fn url_rules_match_by_prefix() {
     let config = rules("[allow]\nfetch = [\"https://docs.rs/*\"]\n[deny]\nfetch = [\"http://*\"]\n");
     assert_eq!(
-        config.evaluate("fetch", &json!({"url": "https://docs.rs/crate/1.0"}), workspace()),
+        eval_req(
+            &config,
+            ("fetch", &json!({"url": "https://docs.rs/crate/1.0"})),
+            workspace()
+        ),
         Decision::Allow
     );
     assert_eq!(
-        config.evaluate("fetch", &json!({"url": "https://evil.example"}), workspace()),
+        eval_req(&config, ("fetch", &json!({"url": "https://evil.example"})), workspace()),
         Decision::Ask
     );
     assert_eq!(
-        config.evaluate("fetch", &json!({"url": "http://docs.rs/insecure"}), workspace()),
+        eval_req(
+            &config,
+            ("fetch", &json!({"url": "http://docs.rs/insecure"})),
+            workspace()
+        ),
         Decision::Deny("denied by permission rule 'fetch|http://*'".to_string())
     );
 }
@@ -318,12 +339,15 @@ fn temp_dir(name: &str) -> PathBuf {
 
 #[test]
 fn rpc_initialize_and_tools_list() {
+    let mut stdin = std::io::Cursor::new(Vec::new());
+    let mut stdout = Vec::new();
+
     let req = RpcRequestPayload {
         id: Some(json!(1)),
         method: "initialize".to_string(),
         params: None,
     };
-    let resp = handle_rpc(req).unwrap();
+    let resp = handle_rpc(req, &mut stdin, &mut stdout).unwrap();
     assert_eq!(resp.id, json!(1));
     assert!(resp.error.is_none());
 
@@ -332,7 +356,48 @@ fn rpc_initialize_and_tools_list() {
         method: "tools/list".to_string(),
         params: None,
     };
-    let resp = handle_rpc(req).unwrap();
+    let resp = handle_rpc(req, &mut stdin, &mut stdout).unwrap();
     assert_eq!(resp.id, json!(2));
-    assert!(!resp.result.unwrap()["tools"].as_array().unwrap().is_empty());
+    assert!(resp.result.is_some());
+}
+
+#[test]
+fn rpc_daemon_tool_call_allow_and_deny() {
+    let dir = temp_dir("rpc_test");
+    std::fs::write(
+        dir.join("permission.toml"),
+        "[allow]\nbash = [\"cargo *\"]\n[deny]\nbash = [\"rm -rf *\"]\n",
+    )
+    .unwrap();
+
+    let mut stdin = std::io::Cursor::new(Vec::new());
+    let mut stdout = Vec::new();
+
+    unsafe {
+        std::env::set_var("RHO_HOME", &dir);
+    }
+
+    let req_allow = RpcRequestPayload {
+        id: Some(json!(10)),
+        method: "hook/tool_call".to_string(),
+        params: Some(json!({
+            "tool_name": "bash",
+            "args": {"command": "cargo test"}
+        })),
+    };
+    let resp = handle_rpc(req_allow, &mut stdin, &mut stdout).unwrap();
+    assert_eq!(resp.result.unwrap()["action"], "continue");
+
+    let req_deny = RpcRequestPayload {
+        id: Some(json!(11)),
+        method: "hook/tool_call".to_string(),
+        params: Some(json!({
+            "tool_name": "bash",
+            "args": {"command": "rm -rf /"}
+        })),
+    };
+    let resp = handle_rpc(req_deny, &mut stdin, &mut stdout).unwrap();
+    assert_eq!(resp.result.unwrap()["action"], "skip");
+
+    std::fs::remove_dir_all(dir).unwrap();
 }

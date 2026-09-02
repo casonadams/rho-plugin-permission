@@ -161,3 +161,65 @@ fn interactive_prompt_cancelled_denies() {
     child.wait().unwrap();
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn daemon_protocol_roundtrips_with_allow_and_prompt() {
+    let dir = temp_dir("daemon_e2e");
+    let toml_path = dir.join("permission.toml");
+    std::fs::write(&toml_path, "[allow]\nbash = [\"git status *\"]\n").unwrap();
+    let (mut child, mut stdin, mut stdout) = spawn(&dir);
+
+    // 1. Initialize
+    write_line(
+        &mut stdin,
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+    );
+    let init_res = read_line(&mut stdout);
+    assert_eq!(init_res["id"], 1);
+    assert!(
+        init_res["result"]["subscribes"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("tool_call"))
+    );
+
+    // 2. Allowed tool call
+    write_line(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "hook/tool_call",
+            "params": {"tool_name": "bash", "args": {"command": "git status"}}
+        }),
+    );
+    let allow_res = read_line(&mut stdout);
+    assert_eq!(allow_res["id"], 2);
+    assert_eq!(allow_res["result"]["action"], "continue");
+
+    // 3. Unmatched call -> triggers host/ui/select
+    write_line(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "hook/tool_call",
+            "params": {"tool_name": "bash", "args": {"command": "cargo build"}}
+        }),
+    );
+    let prompt_req = read_line(&mut stdout);
+    assert_eq!(prompt_req["method"], "host/ui/select");
+
+    // Host responds with selected: 0 (Allow)
+    write_line(
+        &mut stdin,
+        &json!({"jsonrpc": "2.0", "id": 1, "result": {"selected": 0}}),
+    );
+    let decision = read_line(&mut stdout);
+    assert_eq!(decision["id"], 3);
+    assert_eq!(decision["result"]["action"], "continue");
+
+    drop(stdin);
+    let _ = child.kill();
+    std::fs::remove_dir_all(dir).unwrap();
+}

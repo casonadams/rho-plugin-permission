@@ -21,11 +21,11 @@ Run from the repo root:
 
 ## Architecture and conventions
 
-- `src/main.rs` is the JSON-lines protocol adapter: parses stdin lines as either
-  a hook event or a JSON-RPC request; one hook event per process lifetime — it
-  emits the response and exits. The interactive `ui/prompt` round-trip is only
-  attempted when the host advertises the `ui_prompt` capability; otherwise fall
-  back to `{"action": "ask"}`.
+- `src/main.rs` is the JSON-RPC daemon and JSON-lines protocol adapter:
+  serves long-running daemon requests (`hook/tool_call`, `initialize`) as well
+  as legacy one-shot hook events. In daemon mode, interactive confirmation is
+  requested via `host/ui/select` or `ui/prompt`, returning Rig-native
+  `{"action": "continue"}` or `{"action": "skip", "reason": "..."}`.
 - `src/permission.rs` is the rule engine, no I/O beyond loading
   `permission.toml`. `save_allow_rule` must keep using `toml_edit` so user
   comments and formatting in `permission.toml` survive a saved rule.

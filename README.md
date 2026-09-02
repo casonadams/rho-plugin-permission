@@ -101,11 +101,10 @@ read = ["*.env", "*.env*"]          # leading `*` so absolute paths match too
 
 ## How it works
 
-The plugin hooks rho's `pre_tool_call` event for every tool call:
+The plugin operates as a long-running JSON-RPC 2.0 daemon (and supports legacy one-shot tool hooks) for `rho`:
 
-1. **Rule match** — allow rules run the call without prompting; deny rules block
-   it with the rule as the reason.
-2. **No match** — rho shows a permission modal with **Allow**, **Always allow**
+1. **Rule match** — allow rules proceed with `{"action": "continue"}` without prompting; deny rules return `{"action": "skip", "reason": "..."}` with the rule as the reason.
+2. **No match** — the plugin calls `host/ui/select` (or `ui/prompt`) to show a permission modal in `rho`'s terminal with **Allow**, **Always allow**
    (saves the suggested rule to `permission.toml`, preserving your comments and
    formatting), or **Deny with reason** — Enter opens a reason input; submitting
    one sends it to the model, an empty submit denies without a reason. Esc
