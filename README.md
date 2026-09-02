@@ -28,16 +28,20 @@ enabled = true
 
 Or `cargo install rho-plugin-permission` from
 [crates.io](https://crates.io/crates/rho-plugin-permission) and register it by
-command instead of path:
+command:
 
 ```toml
 # ~/.config/rho/config.toml
 [plugins.permission]
-command = "rho-plugin-permission"
+command = "rho-plugin-permission"   # resolved via PATH
 enabled = true
 ```
 
-`rho plugin install <crate>` is still a stub in rho; manual config for now.
+If rho is launched by a GUI launcher, `~/.cargo/bin` may not be on `PATH`; use
+the absolute `path` form instead: `path = "/Users/you/.cargo/bin/rho-plugin-permission"`.
+
+`rho plugin install rho-plugin-permission` (current rho) does both steps at
+once: cargo-installs from crates.io and registers the plugin by command.
 
 ## Configuration
 
