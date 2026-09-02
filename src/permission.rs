@@ -1,19 +1,49 @@
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+
+/// Lexical containment check: resolves `.` and `..` without touching the
+/// filesystem (write targets may not exist yet). Absolute paths must sit
+/// under the working dir; `~` is compared literally (rho's tools do not
+/// expand it either).
+fn contained(working_dir: &Path, input: &str) -> bool {
+    let path = Path::new(input);
+    let mut resolved: PathBuf = if path.is_absolute() {
+        PathBuf::new()
+    } else {
+        working_dir.to_path_buf()
+    };
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            component => resolved.push(component),
+        }
+    }
+    resolved.starts_with(working_dir)
+}
 
 /// Shell metacharacters that make a command unverifiable by static rules.
 const DYNAMIC_MARKERS: [&str; 4] = ["$(", "`", "<(", ">("];
 const OPERATOR_CHARS: [char; 4] = ['&', '|', ';', '\n'];
 const INPUT_KEYS: [&str; 4] = ["command", "url", "query", "path"];
 
+/// Tools whose `path` argument is confined to rho's working directory.
+const PATH_TOOLS: [&str; 3] = ["read", "write", "edit"];
+
 /// Rules from `~/.config/rho/permission.toml`: per-tool wildcard pattern lists.
-/// Evaluation is deny-first: any matching deny rule wins over allow rules.
+/// Evaluation is deny-first, then ask: deny beats ask beats allow. Unknown
+/// sections make the file malformed, so a typo'd config fails safe (all ask).
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PermissionConfig {
     #[serde(default)]
     allow: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    ask: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     deny: BTreeMap<String, Vec<String>>,
 }
@@ -34,20 +64,32 @@ impl PermissionConfig {
             .unwrap_or_default()
     }
 
-    pub fn evaluate(&self, tool: &str, args: &Value) -> Decision {
+    pub fn evaluate(&self, tool: &str, args: &Value, working_dir: Option<&Path>) -> Decision {
         let input = match_input(args);
-        let segments = command_segments(tool, &input);
+        self.decide(tool, &input, working_dir)
+    }
+
+    /// Order: deny, then the workspace-escape ask, then explicit ask rules,
+    /// then allow. `working_dir` None (cwd unavailable) fails closed: path
+    /// tools always ask.
+    fn decide(&self, tool: &str, input: &str, working_dir: Option<&Path>) -> Decision {
+        let segments = command_segments(tool, input);
         if let Some(pattern) = first_match(&self.deny, tool, &segments) {
             return Decision::Deny(format!("denied by permission rule '{tool}|{pattern}'"));
         }
-        self.allow_decision(tool, &input)
+        let escapes = PATH_TOOLS.contains(&tool) && !working_dir.is_some_and(|dir| contained(dir, input));
+        if escapes || first_match(&self.ask, tool, &segments).is_some() {
+            return Decision::Ask;
+        }
+        self.allow_decision(tool, input)
     }
 
     fn allow_decision(&self, tool: &str, input: &str) -> Decision {
-        let segments = command_segments(tool, input);
-        if tool == "bash" && (segments.is_empty() || has_dynamic_execution(input)) {
+        let unverifiable = tool == "bash" && unverifiable_bash(input);
+        if unverifiable {
             return Decision::Ask;
         }
+        let segments = command_segments(tool, input);
         if all_match(&self.allow, tool, &segments) {
             Decision::Allow
         } else {
@@ -85,6 +127,15 @@ pub fn config_path() -> Option<PathBuf> {
         .map(|home| PathBuf::from(home).join(".config/rho/permission.toml"))
 }
 
+/// A missing file is fine (no rules: everything asks); a malformed one also
+/// makes load() ignore every rule, which is invisible otherwise — rho
+/// discards plugin stderr, so prompts are the only place to say so.
+pub fn config_is_healthy() -> bool {
+    config_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .is_none_or(|raw| toml::from_str::<PermissionConfig>(&raw).is_ok())
+}
+
 /// The string a tool's arguments are matched against. Falls back to the JSON
 /// dump so unknown tools still match `*`-style rules.
 pub(crate) fn match_input(args: &Value) -> String {
@@ -113,6 +164,25 @@ pub(crate) fn command_segments(tool: &str, input: &str) -> Vec<String> {
 
 pub(crate) fn has_dynamic_execution(command: &str) -> bool {
     DYNAMIC_MARKERS.iter().any(|marker| command.contains(marker))
+}
+
+/// Wildcard rules cannot know what a bash command touches when it redirects
+/// output: `>` and `>>` write files, `&>` writes both streams. Only fd dups
+/// (`2>&1`, `>&2`) are safe. A quoted `>` also asks — fail-closed, same as
+/// quoted operators in `command_segments`.
+pub(crate) fn has_redirection(command: &str) -> bool {
+    let bytes = command.as_bytes();
+    (0..bytes.len()).any(|index| bytes[index] == b'>' && !is_fd_dup(bytes, index))
+}
+
+fn is_fd_dup(bytes: &[u8], index: usize) -> bool {
+    bytes.get(index + 1) == Some(&b'&') && bytes.get(index + 2).is_some_and(|byte| byte.is_ascii_digit())
+}
+
+/// A bash command under a wildcard allow rule must be fully verifiable:
+/// non-empty, no dynamic execution, no file redirection.
+fn unverifiable_bash(command: &str) -> bool {
+    command_segments("bash", command).is_empty() || has_dynamic_execution(command) || has_redirection(command)
 }
 
 /// `*` matches any sequence, `?` matches one character. A trailing " *" also
@@ -147,14 +217,30 @@ fn generic_wildcard(pattern: &str, text: &str) -> bool {
     pattern[pi..].iter().all(|&c| c == '*')
 }
 
-/// Rule offered by "always allow": program + subcommand prefix with a trailing
-/// wildcard; `*` for non-bash tools (covers the whole tool).
+/// Rule offered by "always allow": bash → program + subcommand prefix;
+/// fetch → URL origin; everything else `*`.
 pub fn suggested_rule(tool: &str, input: &str) -> String {
-    if tool != "bash" {
-        return "*".to_string();
+    match tool {
+        "bash" => {
+            let prefix = input.split_whitespace().take(2).collect::<Vec<_>>().join(" ");
+            format!("{prefix} *")
+        }
+        "fetch" => match input.split_once("://") {
+            Some((scheme, rest)) => format!("{scheme}://{}/*", rest.split('/').next().unwrap_or_default()),
+            _ => "*".to_string(),
+        },
+        _ => "*".to_string(),
     }
-    let prefix = input.split_whitespace().take(2).collect::<Vec<_>>().join(" ");
-    format!("{prefix} *")
+}
+
+/// rho registers alias spellings for the web tools; rules key on the canonical
+/// name so one rule covers every alias the model might call.
+pub fn canonical_tool(tool: &str) -> &str {
+    match tool {
+        "webfetch" | "web_fetch" => "fetch",
+        "websearch" | "web_search" => "search",
+        other => other,
+    }
 }
 
 /// Appends the rule to `[allow]` in place. toml_edit keeps every comment and

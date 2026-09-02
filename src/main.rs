@@ -83,7 +83,8 @@ fn dispatch_line<R: BufRead, W: Write>(line: &str, stdin: &mut R, stdout: &mut W
         return;
     };
     match payload {
-        InputPayload::HookEvent(event) => {
+        InputPayload::HookEvent(mut event) => {
+            event.tool = permission::canonical_tool(&event.tool).to_string();
             let response = handle_hook_event(&event, stdin, stdout);
             emit(stdout, &response);
             std::process::exit(0);
@@ -100,7 +101,8 @@ fn handle_hook_event<R: BufRead, W: Write>(payload: &HookEventPayload, stdin: &m
     if payload.event != "pre_tool_call" {
         return json!({"action": "allow"});
     }
-    match PermissionConfig::load().evaluate(&payload.tool, &payload.arguments) {
+    let working_dir = std::env::current_dir().ok();
+    match PermissionConfig::load().evaluate(&payload.tool, &payload.arguments, working_dir.as_deref()) {
         Decision::Allow => json!({"action": "allow"}),
         Decision::Deny(reason) => json!({"action": "deny", "reason": reason}),
         Decision::Ask => resolve_ask(payload, stdin, stdout),
@@ -125,17 +127,21 @@ fn prompt_host<R: BufRead, W: Write>(payload: &HookEventPayload, stdin: &mut R, 
 fn prompt_request(payload: &HookEventPayload) -> (Value, String) {
     let input = permission::match_input(&payload.arguments);
     let rule = permission::suggested_rule(&payload.tool, &input);
+    let mut body = format!("{} {input}", payload.tool);
+    if !permission::config_is_healthy() {
+        body.push_str("\n(permission.toml is malformed - all rules are ignored until it is fixed)");
+    }
     let request = json!({
         "jsonrpc": "2.0",
         "id": PROMPT_ID,
         "method": "ui/prompt",
         "params": {
             "title": "Permission Request",
-            "body": input,
+            "body": body,
             "options": [
                 {"label": "Allow", "description": "Execute this tool call"},
                 {"label": "Always allow", "description": format!("Save rule '{}|{}' to permission.toml", payload.tool, rule)},
-                {"label": "Deny", "description": "Block this tool call; type a reason below to send one to the model"}
+                {"label": "Deny with reason", "description": "Enter a reason to send to the model; empty denies without one"}
             ],
             "allow_custom": true
         }

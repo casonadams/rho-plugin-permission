@@ -37,9 +37,12 @@ This crate is a security gate; never weaken these fail-safe behaviors:
 - Deny rules always win over allow rules.
 - Missing or malformed `permission.toml` means no rules: every call asks, never
   allows.
-- Bash commands containing `$(`, backticks, `<(`, `>` always ask — static rules
-  cannot verify them. Compound commands split on `&&`, `||`, `;`, `|`, `&`, `\n`
-  and every subcommand must match an allow rule.
+- Bash commands containing `$(`, backticks, `<(`, or `>` always ask — static
+  rules cannot verify them; the `>` check covers file redirection (`>`/`>>`/
+  `&>`) except fd dups like `2>&1`. Compound commands split on `&&`, `||`, `;`,
+  `|`, `&`, `\n` and every subcommand must match an allow rule.
+- `read`/`write`/`edit` paths outside rho's working directory always ask; allow
+  rules cannot grant workspace-escape access (deny still wins).
 - Deny reasons and prompt text are relayed to the model; do not include rule
   file contents or paths in deny reasons beyond the matched rule.
 
