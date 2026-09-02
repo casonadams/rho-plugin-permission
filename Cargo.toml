@@ -2,6 +2,10 @@
 name = "rho-plugin-permission"
 version = "0.1.0"
 edition = "2024"
+description = "Permission plugin for rho: allow/deny rules plus interactive approval"
+license = "MIT"
+repository = "https://github.com/casonadams/rho-plugin-permission"
+readme = "README.md"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
