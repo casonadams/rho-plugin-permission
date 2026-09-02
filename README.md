@@ -6,9 +6,20 @@ for everything else.
 
 ## Install
 
+Build the plugin, then register it in `~/.config/rho/config.toml`:
+
 ```sh
-rho plugin install rho-plugin-permission
+cargo build --release   # in this repo
 ```
+
+```toml
+# ~/.config/rho/config.toml
+[plugins.permission]
+path = "/absolute/path/to/rho-plugin-permission"   # rho finds target/release/rho-plugin-permission
+enabled = true
+```
+
+`rho plugin install <crate>` is still a stub in rho; manual config for now.
 
 ## Configuration
 
