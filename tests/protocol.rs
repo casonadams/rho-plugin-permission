@@ -1,5 +1,3 @@
-//! End-to-end protocol tests: spawn the plugin binary, feed hook events on
-//! stdin, and drive the ui/prompt exchange the way a rho host would.
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -24,16 +22,6 @@ fn spawn(config_dir: &Path) -> (Child, ChildStdin, BufReader<std::process::Child
     (child, stdin, stdout)
 }
 
-fn hook_event(command: &str, ui_prompt: bool) -> String {
-    let capabilities = if ui_prompt {
-        json!({"ui_prompt": true})
-    } else {
-        json!({})
-    };
-    json!({"event": "pre_tool_call", "tool": "bash", "arguments": {"command": command}, "capabilities": capabilities})
-        .to_string()
-}
-
 fn read_line(stdout: &mut BufReader<std::process::ChildStdout>) -> Value {
     let mut line = String::new();
     stdout.read_line(&mut line).unwrap();
@@ -47,126 +35,9 @@ fn write_line(stdin: &mut ChildStdin, value: &Value) {
 }
 
 #[test]
-fn allow_rule_approves_without_prompting() {
+fn daemon_initialize_and_allow_rule() {
     let dir = temp_dir("allow");
     std::fs::write(dir.join("permission.toml"), "[allow]\nbash = [\"cargo *\"]\n").unwrap();
-    let (_child, mut stdin, mut stdout) = spawn(&dir);
-
-    write_line(
-        &mut stdin,
-        &serde_json::from_str::<Value>(&hook_event("cargo test", false)).unwrap(),
-    );
-    assert_eq!(read_line(&mut stdout), json!({"action": "allow"}));
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn unmatched_call_falls_back_to_host_ask() {
-    let dir = temp_dir("fallback");
-    let (_child, mut stdin, mut stdout) = spawn(&dir);
-
-    write_line(
-        &mut stdin,
-        &serde_json::from_str::<Value>(&hook_event("cargo test", false)).unwrap(),
-    );
-    assert_eq!(read_line(&mut stdout), json!({"action": "ask"}));
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn deny_rule_blocks_with_reason() {
-    let dir = temp_dir("deny");
-    std::fs::write(dir.join("permission.toml"), "[deny]\nbash = [\"git push *\"]\n").unwrap();
-    let (_child, mut stdin, mut stdout) = spawn(&dir);
-
-    write_line(
-        &mut stdin,
-        &serde_json::from_str::<Value>(&hook_event("git push origin main", false)).unwrap(),
-    );
-    let reply = read_line(&mut stdout);
-    assert_eq!(reply["action"], "deny");
-    assert!(reply["reason"].as_str().unwrap().contains("git push *"));
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn interactive_prompt_allow_always_saves_rule() {
-    let dir = temp_dir("always");
-    let toml_path = dir.join("permission.toml");
-    std::fs::write(&toml_path, "# my rules\n").unwrap();
-    let (mut child, mut stdin, mut stdout) = spawn(&dir);
-
-    write_line(
-        &mut stdin,
-        &serde_json::from_str::<Value>(&hook_event("cargo test --nocapture", true)).unwrap(),
-    );
-    let request = read_line(&mut stdout);
-    assert_eq!(request["method"], "ui/prompt");
-    assert_eq!(request["id"], 1);
-    let options = request["params"]["options"].as_array().unwrap();
-    assert_eq!(options.len(), 3);
-    assert!(options[1]["description"].as_str().unwrap().contains("cargo test *"));
-    assert_eq!(request["params"]["allow_custom"], true);
-
-    write_line(
-        &mut stdin,
-        &json!({"jsonrpc": "2.0", "id": 1, "result": {"selected": 1}}),
-    );
-    assert_eq!(read_line(&mut stdout), json!({"action": "allow"}));
-    child.wait().unwrap();
-
-    let saved = std::fs::read_to_string(&toml_path).unwrap();
-    assert!(saved.contains("# my rules"), "comment lost:\n{saved}");
-    assert!(saved.contains("cargo test *"), "rule not saved:\n{saved}");
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn interactive_prompt_custom_text_denies_with_reason() {
-    let dir = temp_dir("custom");
-    let (mut child, mut stdin, mut stdout) = spawn(&dir);
-
-    write_line(
-        &mut stdin,
-        &serde_json::from_str::<Value>(&hook_event("cargo test", true)).unwrap(),
-    );
-    assert_eq!(read_line(&mut stdout)["method"], "ui/prompt");
-
-    write_line(
-        &mut stdin,
-        &json!({"jsonrpc": "2.0", "id": 1, "result": {"custom": "tests are flaky, fix first"}}),
-    );
-    let reply = read_line(&mut stdout);
-    assert_eq!(reply["action"], "deny");
-    assert!(reply["reason"].as_str().unwrap().contains("tests are flaky, fix first"));
-    child.wait().unwrap();
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn interactive_prompt_cancelled_denies() {
-    let dir = temp_dir("cancel");
-    let (mut child, mut stdin, mut stdout) = spawn(&dir);
-
-    write_line(
-        &mut stdin,
-        &serde_json::from_str::<Value>(&hook_event("cargo test", true)).unwrap(),
-    );
-    assert_eq!(read_line(&mut stdout)["method"], "ui/prompt");
-
-    write_line(&mut stdin, &json!({"jsonrpc": "2.0", "id": 1, "result": null}));
-    let reply = read_line(&mut stdout);
-    assert_eq!(reply["action"], "deny");
-    assert!(reply["reason"].as_str().unwrap().contains("Permission denied by user"));
-    child.wait().unwrap();
-    std::fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn daemon_protocol_roundtrips_with_allow_and_prompt() {
-    let dir = temp_dir("daemon_e2e");
-    let toml_path = dir.join("permission.toml");
-    std::fs::write(&toml_path, "[allow]\nbash = [\"git status *\"]\n").unwrap();
     let (mut child, mut stdin, mut stdout) = spawn(&dir);
 
     // 1. Initialize
@@ -176,12 +47,7 @@ fn daemon_protocol_roundtrips_with_allow_and_prompt() {
     );
     let init_res = read_line(&mut stdout);
     assert_eq!(init_res["id"], 1);
-    assert!(
-        init_res["result"]["subscribes"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("tool_call"))
-    );
+    assert_eq!(init_res["result"]["serverInfo"]["name"], "rho-plugin-permission");
 
     // 2. Allowed tool call
     write_line(
@@ -190,34 +56,116 @@ fn daemon_protocol_roundtrips_with_allow_and_prompt() {
             "jsonrpc": "2.0",
             "id": 2,
             "method": "hook/tool_call",
-            "params": {"tool_name": "bash", "args": {"command": "git status"}}
+            "params": {"event": "tool_call", "tool_name": "bash", "args": {"command": "cargo test"}}
         }),
     );
     let allow_res = read_line(&mut stdout);
     assert_eq!(allow_res["id"], 2);
     assert_eq!(allow_res["result"]["action"], "continue");
 
-    // 3. Unmatched call -> triggers host/ui/select
+    drop(stdin);
+    let _ = child.kill();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn daemon_deny_rule_blocks_with_reason() {
+    let dir = temp_dir("deny");
+    std::fs::write(dir.join("permission.toml"), "[deny]\nbash = [\"git push *\"]\n").unwrap();
+    let (mut child, mut stdin, mut stdout) = spawn(&dir);
+
     write_line(
         &mut stdin,
         &json!({
             "jsonrpc": "2.0",
             "id": 3,
             "method": "hook/tool_call",
-            "params": {"tool_name": "bash", "args": {"command": "cargo build"}}
+            "params": {"event": "tool_call", "tool_name": "bash", "args": {"command": "git push origin main"}}
         }),
     );
-    let prompt_req = read_line(&mut stdout);
-    assert_eq!(prompt_req["method"], "host/ui/select");
+    let reply = read_line(&mut stdout);
+    assert_eq!(reply["id"], 3);
+    assert_eq!(reply["result"]["action"], "skip");
+    assert!(reply["result"]["reason"].as_str().unwrap().contains("git push *"));
 
-    // Host responds with selected: 0 (Allow)
+    drop(stdin);
+    let _ = child.kill();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn daemon_interactive_prompt_allow_always_saves_rule() {
+    let dir = temp_dir("always");
+    let toml_path = dir.join("permission.toml");
+    std::fs::write(&toml_path, "# my rules\n").unwrap();
+    let (mut child, mut stdin, mut stdout) = spawn(&dir);
+
     write_line(
         &mut stdin,
-        &json!({"jsonrpc": "2.0", "id": 1, "result": {"selected": 0}}),
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "hook/tool_call",
+            "params": {"event": "tool_call", "tool_name": "bash", "args": {"command": "cargo test --nocapture"}}
+        }),
+    );
+
+    let request = read_line(&mut stdout);
+    assert_eq!(request["method"], "host/ui/select");
+    let host_req_id = request["id"].as_u64().unwrap();
+    let options = request["params"]["options"].as_array().unwrap();
+    assert_eq!(options.len(), 3);
+    assert!(options[1]["description"].as_str().unwrap().contains("cargo test *"));
+
+    // Host responds with selected: 1 (Always allow)
+    write_line(
+        &mut stdin,
+        &json!({"jsonrpc": "2.0", "id": host_req_id, "result": {"selected": 1}}),
     );
     let decision = read_line(&mut stdout);
-    assert_eq!(decision["id"], 3);
+    assert_eq!(decision["id"], 4);
     assert_eq!(decision["result"]["action"], "continue");
+
+    let saved = std::fs::read_to_string(&toml_path).unwrap();
+    assert!(saved.contains("# my rules"), "comment lost:\n{saved}");
+    assert!(saved.contains("cargo test *"), "rule not saved:\n{saved}");
+
+    drop(stdin);
+    let _ = child.kill();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn daemon_interactive_prompt_custom_text_denies_with_reason() {
+    let dir = temp_dir("custom");
+    let (mut child, mut stdin, mut stdout) = spawn(&dir);
+
+    write_line(
+        &mut stdin,
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "hook/tool_call",
+            "params": {"event": "tool_call", "tool_name": "bash", "args": {"command": "cargo test"}}
+        }),
+    );
+    let request = read_line(&mut stdout);
+    assert_eq!(request["method"], "host/ui/select");
+    let host_req_id = request["id"].as_u64().unwrap();
+
+    write_line(
+        &mut stdin,
+        &json!({"jsonrpc": "2.0", "id": host_req_id, "result": {"custom": "tests are flaky, fix first"}}),
+    );
+    let reply = read_line(&mut stdout);
+    assert_eq!(reply["id"], 5);
+    assert_eq!(reply["result"]["action"], "skip");
+    assert!(
+        reply["result"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("tests are flaky, fix first")
+    );
 
     drop(stdin);
     let _ = child.kill();

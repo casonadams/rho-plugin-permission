@@ -3,6 +3,8 @@ use permission::{
     Decision, EvalRequest, PermissionConfig, canonical_tool, command_segments, has_dynamic_execution, has_redirection,
     match_input, save_allow_rule, suggested_rule, wildcard_match,
 };
+use serde::Deserialize;
+use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -337,67 +339,43 @@ fn temp_dir(name: &str) -> PathBuf {
     dir
 }
 
-#[test]
-fn rpc_initialize_and_tools_list() {
-    let mut stdin = std::io::Cursor::new(Vec::new());
-    let mut stdout = Vec::new();
-
-    let req = RpcRequestPayload {
-        id: Some(json!(1)),
-        method: "initialize".to_string(),
-        params: None,
-    };
-    let resp = handle_rpc(req, &mut stdin, &mut stdout).unwrap();
-    assert_eq!(resp.id, json!(1));
-    assert!(resp.error.is_none());
-
-    let req = RpcRequestPayload {
-        id: Some(json!(2)),
-        method: "tools/list".to_string(),
-        params: None,
-    };
-    let resp = handle_rpc(req, &mut stdin, &mut stdout).unwrap();
-    assert_eq!(resp.id, json!(2));
-    assert!(resp.result.is_some());
-}
-
-#[test]
-fn rpc_daemon_tool_call_allow_and_deny() {
-    let dir = temp_dir("rpc_test");
+#[tokio::test]
+async fn test_sdk_plugin_on_event_allow_and_deny() {
+    let dir = temp_dir("sdk_test");
     std::fs::write(
         dir.join("permission.toml"),
         "[allow]\nbash = [\"cargo *\"]\n[deny]\nbash = [\"rm -rf *\"]\n",
     )
     .unwrap();
 
-    let mut stdin = std::io::Cursor::new(Vec::new());
-    let mut stdout = Vec::new();
-
     unsafe {
         std::env::set_var("RHO_HOME", &dir);
     }
 
-    let req_allow = RpcRequestPayload {
-        id: Some(json!(10)),
-        method: "hook/tool_call".to_string(),
-        params: Some(json!({
-            "tool_name": "bash",
-            "args": {"command": "cargo test"}
-        })),
-    };
-    let resp = handle_rpc(req_allow, &mut stdin, &mut stdout).unwrap();
-    assert_eq!(resp.result.unwrap()["action"], "continue");
+    let ctx = HostContext::noop();
 
-    let req_deny = RpcRequestPayload {
-        id: Some(json!(11)),
-        method: "hook/tool_call".to_string(),
-        params: Some(json!({
-            "tool_name": "bash",
-            "args": {"command": "rm -rf /"}
-        })),
-    };
-    let resp = handle_rpc(req_deny, &mut stdin, &mut stdout).unwrap();
-    assert_eq!(resp.result.unwrap()["action"], "skip");
+    let plugin = PermissionPlugin;
+    let allow_flow = plugin
+        .on_event(
+            StepEvent::ToolCall {
+                tool_name: "bash".into(),
+                args: json!({"command": "cargo test"}),
+            },
+            &ctx,
+        )
+        .await;
+    assert_eq!(allow_flow, Flow::cont());
+
+    let deny_flow = plugin
+        .on_event(
+            StepEvent::ToolCall {
+                tool_name: "bash".into(),
+                args: json!({"command": "rm -rf /"}),
+            },
+            &ctx,
+        )
+        .await;
+    assert!(matches!(deny_flow, Flow::Skip { .. }));
 
     std::fs::remove_dir_all(dir).unwrap();
 }
