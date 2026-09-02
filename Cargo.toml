@@ -1,6 +1,6 @@
 [package]
 name = "rho-plugin-permission"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Permission plugin for rho: allow/deny rules plus interactive approval"
 license = "MIT"
