@@ -6,16 +6,23 @@ for everything else.
 
 ## Install
 
-Build the plugin, then register it in `~/.config/rho/config.toml`:
+Download a prebuilt binary from the
+[releases page](https://github.com/casonadams/rho-plugin-permission/releases)
+and save it to `~/.config/rho/plugins/`:
 
 ```sh
-cargo build --release   # in this repo
+mkdir -p ~/.config/rho/plugins
+tar xzf rho-plugin-permission-*-aarch64-apple-darwin.tar.gz -C ~/.config/rho/plugins
 ```
+
+Or build from source in this repo with `cargo build --release` and point `path`
+at this repo directory — rho finds `target/release/rho-plugin-permission` under
+it. Then register the plugin in `~/.config/rho/config.toml`:
 
 ```toml
 # ~/.config/rho/config.toml
 [plugins.permission]
-path = "/absolute/path/to/rho-plugin-permission"   # rho finds target/release/rho-plugin-permission
+path = "/Users/you/.config/rho/plugins/rho-plugin-permission"   # absolute: ~ is not expanded
 enabled = true
 ```
 
@@ -27,11 +34,18 @@ enabled = true
 
 ```toml
 [allow]
-bash = ["git *", "cargo *", "npm run *"]
+bash = [
+  "git *",
+  "cargo *",
+  "npm run *"
+]
 edit = ["*"]
 
 [deny]
-bash = ["rm -rf *", "git push --force *"]
+bash = [
+  "rm -rf *",
+  "git push --force *"
+]
 ```
 
 - `*` matches any sequence, `?` one character. Deny rules win over allow rules.
@@ -45,8 +59,8 @@ bash = ["rm -rf *", "git push --force *"]
 
 The plugin hooks rho's `pre_tool_call` event for every tool call:
 
-1. **Rule match** — allow rules run the call without prompting; deny rules
-   block it with the rule as the reason.
+1. **Rule match** — allow rules run the call without prompting; deny rules block
+   it with the rule as the reason.
 2. **No match** — rho shows a permission modal with **Allow**, **Always allow**
    (saves the suggested rule to `permission.toml`, preserving your comments and
    formatting), or **Deny** — typing a reason sends that text to the model.
@@ -56,5 +70,5 @@ The plugin hooks rho's `pre_tool_call` event for every tool call:
 ## Development
 
 ```sh
-cargo test      # unit + end-to-end protocol tests
+cargo test
 ```
