@@ -138,7 +138,7 @@ fn interactive_prompt_custom_text_denies_with_reason() {
     );
     let reply = read_line(&mut stdout);
     assert_eq!(reply["action"], "deny");
-    assert_eq!(reply["reason"], "tests are flaky, fix first");
+    assert!(reply["reason"].as_str().unwrap().contains("tests are flaky, fix first"));
     child.wait().unwrap();
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -157,7 +157,7 @@ fn interactive_prompt_cancelled_denies() {
     write_line(&mut stdin, &json!({"jsonrpc": "2.0", "id": 1, "result": null}));
     let reply = read_line(&mut stdout);
     assert_eq!(reply["action"], "deny");
-    assert_eq!(reply["reason"], "user denied tool execution");
+    assert!(reply["reason"].as_str().unwrap().contains("Permission denied by user"));
     child.wait().unwrap();
     std::fs::remove_dir_all(dir).unwrap();
 }

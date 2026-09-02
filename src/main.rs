@@ -121,6 +121,13 @@ fn resolve_legacy_ask<R: BufRead, W: Write>(payload: &HookEventPayload, stdin: &
     apply_legacy_choice(&payload.tool, &rule, &choice)
 }
 
+fn format_user_denial(custom: Option<&str>) -> String {
+    if let Some(reason) = custom.map(str::trim).filter(|s| !s.is_empty()) {
+        return format!("Permission denied by user: \"{reason}\". Do not retry this operation.");
+    }
+    "Permission denied by user. Do not retry this operation without explicit user request.".to_string()
+}
+
 fn apply_legacy_choice(tool: &str, rule: &str, choice: &Value) -> Value {
     match choice.get("selected").and_then(Value::as_u64) {
         Some(0) => json!({"action": "allow"}),
@@ -129,11 +136,8 @@ fn apply_legacy_choice(tool: &str, rule: &str, choice: &Value) -> Value {
             json!({"action": "allow"})
         }
         _ => {
-            let reason = choice
-                .get("custom")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .unwrap_or_else(|| "user denied tool execution".to_string());
+            let custom = choice.get("custom").and_then(Value::as_str);
+            let reason = format_user_denial(custom);
             json!({"action": "deny", "reason": reason})
         }
     }
@@ -234,11 +238,8 @@ fn apply_daemon_choice(tool: &str, rule: &str, choice: &Value) -> Value {
             json!({"action": "continue"})
         }
         _ => {
-            let reason = choice
-                .get("custom")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .unwrap_or_else(|| "user denied tool execution".to_string());
+            let custom = choice.get("custom").and_then(Value::as_str);
+            let reason = format_user_denial(custom);
             json!({"action": "skip", "reason": reason})
         }
     }
