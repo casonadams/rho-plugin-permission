@@ -15,3 +15,8 @@ toml_edit = "0.22"
 async-trait = "0.1"
 tokio = { version = "1.43", features = ["macros", "rt-multi-thread"] }
 rho-plugin-sdk = "0.1.3"
+
+# Local testing: prefill support in host/ui/input (input_with_default).
+# Remove before publishing; requires rho-plugin-sdk with input_with_default on crates.io.
+[patch.crates-io]
+rho-plugin-sdk = { path = "../rho/crates/rho-plugin-sdk" }

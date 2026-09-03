@@ -116,7 +116,7 @@ fn daemon_interactive_prompt_allow_always_saves_rule() {
     let options = request["params"]["options"].as_array().unwrap();
     assert_eq!(options.len(), 4);
     assert_eq!(options[0]["label"], "Allow");
-    assert_eq!(options[1]["label"], "Edit / View");
+    assert_eq!(options[1]["label"], "Edit");
     assert_eq!(options[2]["label"], "Always allow");
     assert_eq!(options[3]["label"], "Deny with reason");
     assert!(options[2]["description"].as_str().unwrap().contains("cargo test *"));
@@ -127,9 +127,10 @@ fn daemon_interactive_prompt_allow_always_saves_rule() {
         &json!({"jsonrpc": "2.0", "id": host_req_id, "result": {"selected": 2}}),
     );
 
-    // Plugin prompts for rule pattern via host/ui/input
+    // Plugin prompts for rule pattern via host/ui/input, prefilled with the suggestion
     let input_req = read_line(&mut stdout);
     assert_eq!(input_req["method"], "host/ui/input");
+    assert_eq!(input_req["params"]["value"], "cargo test *");
     let input_req_id = input_req["id"].as_u64().unwrap();
 
     // Host confirms the pattern
@@ -170,7 +171,7 @@ fn daemon_interactive_prompt_edit_view_rewrites_args() {
     assert_eq!(request["method"], "host/ui/select");
     let host_req_id = request["id"].as_u64().unwrap();
 
-    // Select Edit / View (index 1)
+    // Select Edit (index 1)
     write_line(
         &mut stdin,
         &json!({"jsonrpc": "2.0", "id": host_req_id, "result": {"selected": 1}}),
@@ -178,6 +179,7 @@ fn daemon_interactive_prompt_edit_view_rewrites_args() {
 
     let input_req = read_line(&mut stdout);
     assert_eq!(input_req["method"], "host/ui/input");
+    assert_eq!(input_req["params"]["value"], "cargo test");
     let input_req_id = input_req["id"].as_u64().unwrap();
 
     // User edits command to `cargo test --lib`

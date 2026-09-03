@@ -101,7 +101,7 @@ fn format_prompt_body(tool: &str, input: &str) -> String {
 fn prompt_options(rule: &str) -> Vec<SelectOption> {
     vec![
         SelectOption::with_description("Allow", "Execute this tool call once"),
-        SelectOption::with_description("Edit / View", "Modify command or arguments before executing"),
+        SelectOption::with_description("Edit", "Modify command or arguments before executing"),
         SelectOption::with_description("Always allow", format!("Save rule '{rule}' to permission.toml")),
         SelectOption::with_description("Deny with reason", "Reject with feedback sent to model"),
     ]
@@ -109,7 +109,7 @@ fn prompt_options(rule: &str) -> Vec<SelectOption> {
 
 async fn handle_edit_view(target: (&str, &Value), input: &str, ctx: &HostContext) -> Option<Flow> {
     let (tool, args) = target;
-    let edited = ctx.input("Edit Input", input).await?;
+    let edited = ctx.input_with_default("Edit input (Esc cancels)", input, input).await?;
     let trimmed = edited.trim();
     let new_val = if trimmed.is_empty() { input } else { trimmed };
     let new_args = apply_edited_input(tool, args, new_val);
@@ -117,7 +117,8 @@ async fn handle_edit_view(target: (&str, &Value), input: &str, ctx: &HostContext
 }
 
 async fn handle_always_allow(tool: &str, default_rule: &str, ctx: &HostContext) -> Option<Flow> {
-    let pattern = ctx.input("Rule Pattern to Save", default_rule).await?;
+    let prompt = format!("Rule pattern to save to permission.toml (surface: {tool})");
+    let pattern = ctx.input_with_default("Always allow", &prompt, default_rule).await?;
     let trimmed = pattern.trim();
     let chosen_rule = if trimmed.is_empty() { default_rule } else { trimmed };
     save_rule(tool, chosen_rule);
