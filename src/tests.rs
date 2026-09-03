@@ -2,7 +2,7 @@ use super::*;
 use matcher::wildcard_match;
 use permission::{
     Decision, EvalRequest, PermissionConfig, canonical_tool, command_segments, has_dynamic_execution, has_redirection,
-    match_input, save_allow_rule, suggested_rule,
+    match_input, rule_surface, save_allow_rule, suggested_rule,
 };
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -241,8 +241,14 @@ fn suggested_rules() {
     assert_eq!(suggested_rule("bash", "cargo test --nocapture"), "cargo test *");
     assert_eq!(suggested_rule("bash", "cat /etc/hosts"), "cat *");
     assert_eq!(suggested_rule("bash", "ls"), "ls *");
-    assert_eq!(suggested_rule("read", "src/main.rs"), "*");
-    assert_eq!(suggested_rule("write", "/tmp/notes.txt"), "*");
+    assert_eq!(suggested_rule("read", "src/main.rs"), "src/main.rs/*");
+    assert_eq!(suggested_rule("write", "/tmp/notes.txt"), "/tmp/notes.txt/*");
+    assert_eq!(suggested_rule("read", "/etc/hosts"), "/etc/hosts/*");
+    assert_eq!(rule_surface("read"), "path");
+    assert_eq!(rule_surface("write"), "path");
+    assert_eq!(rule_surface("edit"), "path");
+    assert_eq!(rule_surface("bash"), "bash");
+    assert_eq!(rule_surface("fetch"), "fetch");
     assert_eq!(
         suggested_rule("fetch", "https://github.com/x/y?z=1"),
         "https://github.com/*"
@@ -512,6 +518,26 @@ fn saved_rules_round_trip_with_comments() {
             .rules
             .iter()
             .any(|r| r.surface == "bash" && r.pattern == "cargo test *")
+    );
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn path_tool_always_allow_saves_to_path_surface_and_overrides_workspace_ask() {
+    let path = temp_dir("path_surface_save").join("permission.toml");
+    save_allow_rule(&path, "path", "/etc/hosts/*").unwrap();
+
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("[permission.path]"), "surface table missing:\n{saved}");
+
+    let scope = policy::parse_scope_from_str(&saved).unwrap();
+    let policy = policy::build_policy(Some(scope), None);
+    let config = PermissionConfig { policy };
+
+    // The saved path rule lets an outside-workspace read through without asking.
+    assert_eq!(
+        eval_req(&config, ("read", &json!({"path": "/etc/hosts"})), workspace()),
+        Decision::Allow
     );
     std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }

@@ -146,8 +146,9 @@ fn apply_edited_input(tool: &str, args: &Value, edited: &str) -> Value {
 
 fn save_rule(tool: &str, rule: &str) {
     let working_dir = std::env::current_dir().ok();
+    let surface = permission::rule_surface(tool);
     if let Some(path) = policy::target_config_path(working_dir.as_deref())
-        && let Err(error) = permission::save_allow_rule(&path, tool, rule)
+        && let Err(error) = permission::save_allow_rule(&path, surface, rule)
     {
         eprintln!("rho-plugin-permission: could not save rule: {error}");
     }

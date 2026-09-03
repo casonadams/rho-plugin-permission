@@ -218,7 +218,21 @@ pub fn suggested_rule(tool: &str, input: &str) -> String {
             Some((scheme, rest)) => format!("{scheme}://{}/*", rest.split('/').next().unwrap_or_default()),
             _ => "*".to_string(),
         },
+        // Path tools draft on the cross-cutting path surface (trailing `/*`
+        // also matches the exact path), so the rule overrides the
+        // workspace-escape ask.
+        "read" | "write" | "edit" => format!("{input}/*"),
         _ => "*".to_string(),
+    }
+}
+
+/// Surface a saved rule belongs to: path-tool rules go on the cross-cutting
+/// `path` surface so they govern every tool touching that path.
+pub fn rule_surface(tool: &str) -> &str {
+    if matches!(tool, "read" | "write" | "edit") {
+        "path"
+    } else {
+        tool
     }
 }
 
