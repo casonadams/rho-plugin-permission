@@ -182,7 +182,12 @@ fn bash_analyzer_command_and_paths() {
 fn complex_commands_format_multiline_for_display() {
     assert_eq!(
         bash::format_command_lines("git status && cargo test || echo fallback ; ls -la"),
-        "git status\n  && cargo test\n  || echo fallback\n  ; ls -la"
+        "git status\n  && cargo test\n  || echo fallback;\nls -la"
+    );
+    // `;` terminates the current line; the next command starts fresh.
+    assert_eq!(
+        bash::format_command_lines("cat a ; cat b ; cat c"),
+        "cat a;\ncat b;\ncat c"
     );
     // Single-line commands pass through unchanged.
     assert_eq!(bash::format_command_lines("cargo test --lib"), "cargo test --lib");
