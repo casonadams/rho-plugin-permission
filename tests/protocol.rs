@@ -121,7 +121,8 @@ fn daemon_interactive_prompt_allow_always_saves_rule() {
     assert_eq!(options[3]["label"], "Deny with reason");
     assert_eq!(options[1]["input"]["label"], "edit");
     assert_eq!(options[1]["input"]["value"], "cargo test --nocapture");
-    assert_eq!(options[2]["input"]["label"], "pattern");
+    assert_eq!(options[2]["input"]["label"], "bash pattern");
+    assert_eq!(options[2]["description"], "Save bash rule to permission.toml");
     assert_eq!(options[2]["input"]["value"], "cargo test --nocapture");
     assert_eq!(options[3]["input"]["label"], "reason");
 

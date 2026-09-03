@@ -64,21 +64,33 @@ struct AskContext<'a> {
 async fn prompt_and_resolve(ask: AskContext<'_>, ctx: &HostContext) -> Flow {
     let tool = ask.tool;
     let input = permission::match_input(ask.args);
-    let pattern_prefill = match ask.drafts {
-        [] => permission::suggested_rule(tool, &input),
-        [draft] => draft.pattern.clone(),
-        many => many
-            .iter()
-            .map(|d| format!("{}: {}", d.surface, d.pattern))
-            .collect::<Vec<_>>()
-            .join("\n"),
+    let (always_prefill, always_label, always_desc) = match ask.drafts {
+        [] => (
+            permission::suggested_rule(tool, &input),
+            format!("{tool} pattern"),
+            format!("Save {tool} rule to permission.toml"),
+        ),
+        [draft] => (
+            draft.pattern.clone(),
+            format!("{} pattern", draft.surface),
+            format!("Save {} rule to permission.toml", draft.surface),
+        ),
+        many => (
+            many.iter()
+                .map(|d| format!("{}: {}", d.surface, d.pattern))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            "rules".to_string(),
+            "Save these rules to permission.toml".to_string(),
+        ),
     };
+    let always = SelectOption::with_input("Always allow", always_desc, always_label, Some(always_prefill));
+    let options = prompt_options(&input, always);
+
     let mut body = format_prompt_body(tool, &input);
     for draft in ask.drafts.iter().filter(|d| d.surface == "path") {
         body.push_str(&format!("\npath: {}", draft.value));
     }
-    let options = prompt_options(&pattern_prefill, &input);
-
     loop {
         match ctx.select("Permission Request", &body, &options, false).await {
             SelectResult::Selected(0) => return Flow::cont(),
@@ -123,21 +135,16 @@ fn format_prompt_body(tool: &str, input: &str) -> String {
     body
 }
 
-fn prompt_options(rule: &str, input: &str) -> Vec<SelectOption> {
+fn prompt_options(edit_prefill: &str, always: SelectOption) -> Vec<SelectOption> {
     vec![
         SelectOption::with_description("Allow", "Execute this tool call once"),
         SelectOption::with_input(
             "Edit",
             "Modify command or arguments before executing",
             "edit",
-            Some(input.to_string()),
+            Some(edit_prefill.to_string()),
         ),
-        SelectOption::with_input(
-            "Always allow",
-            "Modify and save rule to permission.toml",
-            "pattern",
-            Some(rule.to_string()),
-        ),
+        always,
         SelectOption::with_input("Deny with reason", "Reject with feedback sent to model", "reason", None),
     ]
 }
