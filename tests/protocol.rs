@@ -119,24 +119,16 @@ fn daemon_interactive_prompt_allow_always_saves_rule() {
     assert_eq!(options[1]["label"], "Edit");
     assert_eq!(options[2]["label"], "Always allow");
     assert_eq!(options[3]["label"], "Deny with reason");
-    assert!(options[2]["description"].as_str().unwrap().contains("cargo test *"));
+    assert_eq!(options[1]["input"]["label"], "edit");
+    assert_eq!(options[1]["input"]["value"], "cargo test --nocapture");
+    assert_eq!(options[2]["input"]["label"], "pattern");
+    assert_eq!(options[2]["input"]["value"], "cargo test *");
+    assert_eq!(options[3]["input"]["label"], "reason");
 
-    // Host responds with selected: 2 (Always allow)
+    // Host responds: Always allow with the prefilled pattern in one round trip
     write_line(
         &mut stdin,
-        &json!({"jsonrpc": "2.0", "id": host_req_id, "result": {"selected": 2}}),
-    );
-
-    // Plugin prompts for rule pattern via host/ui/input, prefilled with the suggestion
-    let input_req = read_line(&mut stdout);
-    assert_eq!(input_req["method"], "host/ui/input");
-    assert_eq!(input_req["params"]["value"], "cargo test *");
-    let input_req_id = input_req["id"].as_u64().unwrap();
-
-    // Host confirms the pattern
-    write_line(
-        &mut stdin,
-        &json!({"jsonrpc": "2.0", "id": input_req_id, "result": {"value": "cargo test *"}}),
+        &json!({"jsonrpc": "2.0", "id": host_req_id, "result": {"selected": 2, "custom": "cargo test *"}}),
     );
 
     let decision = read_line(&mut stdout);
@@ -171,21 +163,10 @@ fn daemon_interactive_prompt_edit_view_rewrites_args() {
     assert_eq!(request["method"], "host/ui/select");
     let host_req_id = request["id"].as_u64().unwrap();
 
-    // Select Edit (index 1)
+    // Select Edit (index 1); host submits the edited command inline
     write_line(
         &mut stdin,
-        &json!({"jsonrpc": "2.0", "id": host_req_id, "result": {"selected": 1}}),
-    );
-
-    let input_req = read_line(&mut stdout);
-    assert_eq!(input_req["method"], "host/ui/input");
-    assert_eq!(input_req["params"]["value"], "cargo test");
-    let input_req_id = input_req["id"].as_u64().unwrap();
-
-    // User edits command to `cargo test --lib`
-    write_line(
-        &mut stdin,
-        &json!({"jsonrpc": "2.0", "id": input_req_id, "result": {"value": "cargo test --lib"}}),
+        &json!({"jsonrpc": "2.0", "id": host_req_id, "result": {"selected": 1, "custom": "cargo test --lib"}}),
     );
 
     let decision = read_line(&mut stdout);
@@ -217,19 +198,10 @@ fn daemon_interactive_prompt_deny_with_reason_flow() {
     assert_eq!(request["params"]["allow_custom"], false);
     let host_req_id = request["id"].as_u64().unwrap();
 
-    // Select "Deny with reason" (index 3)
+    // Select "Deny with reason" (index 3); reason text submitted inline
     write_line(
         &mut stdin,
-        &json!({"jsonrpc": "2.0", "id": host_req_id, "result": {"selected": 3}}),
-    );
-
-    // Plugin prompts for a reason to send to the model
-    let input_req = read_line(&mut stdout);
-    assert_eq!(input_req["method"], "host/ui/input");
-    let input_req_id = input_req["id"].as_u64().unwrap();
-    write_line(
-        &mut stdin,
-        &json!({"jsonrpc": "2.0", "id": input_req_id, "result": {"value": "tests are flaky, fix first"}}),
+        &json!({"jsonrpc": "2.0", "id": host_req_id, "result": {"selected": 3, "custom": "tests are flaky, fix first"}}),
     );
 
     let reply = read_line(&mut stdout);

@@ -50,26 +50,26 @@ async fn prompt_and_resolve(tool: &str, args: &Value, ctx: &HostContext) -> Flow
     let input = permission::match_input(args);
     let rule = permission::suggested_rule(tool, &input);
     let body = format_prompt_body(tool, &input);
-    let options = prompt_options(&rule);
+    let options = prompt_options(&rule, &input);
 
     loop {
         match ctx.select("Permission Request", &body, &options, false).await {
             SelectResult::Selected(0) => return Flow::cont(),
-            SelectResult::Selected(1) => {
-                if let Some(flow) = handle_edit_view((tool, args), &input, ctx).await {
-                    return flow;
+            SelectResult::SelectedWithInput { index, text } => match index {
+                1 => {
+                    let trimmed = text.trim();
+                    let edited = if trimmed.is_empty() { &input } else { trimmed };
+                    return Flow::rewrite_args(apply_edited_input(tool, args, edited));
                 }
-            }
-            SelectResult::Selected(2) => {
-                if let Some(flow) = handle_always_allow(tool, &rule, ctx).await {
-                    return flow;
+                2 => {
+                    let trimmed = text.trim();
+                    let rule = if trimmed.is_empty() { &rule } else { trimmed };
+                    save_rule(tool, rule);
+                    return Flow::cont();
                 }
-            }
-            SelectResult::Selected(3) => {
-                if let Some(flow) = handle_deny_prompt(ctx).await {
-                    return flow;
-                }
-            }
+                3 => return format_user_denial(&text),
+                _ => {}
+            },
             SelectResult::Selected(_) | SelectResult::Custom(_) | SelectResult::Cancelled => {
                 return Flow::skip(
                     "Permission denied by user. Do not retry this operation without explicit user request.",
@@ -97,36 +97,23 @@ fn format_prompt_body(tool: &str, input: &str) -> String {
     body
 }
 
-fn prompt_options(rule: &str) -> Vec<SelectOption> {
+fn prompt_options(rule: &str, input: &str) -> Vec<SelectOption> {
     vec![
         SelectOption::with_description("Allow", "Execute this tool call once"),
-        SelectOption::with_description("Edit", "Modify command or arguments before executing"),
-        SelectOption::with_description("Always allow", format!("Save rule '{rule}' to permission.toml")),
-        SelectOption::with_description("Deny with reason", "Reject with feedback sent to model"),
+        SelectOption::with_input(
+            "Edit",
+            "Modify command or arguments before executing",
+            "edit",
+            Some(input.to_string()),
+        ),
+        SelectOption::with_input(
+            "Always allow",
+            "Modify and save rule to permission.toml",
+            "pattern",
+            Some(rule.to_string()),
+        ),
+        SelectOption::with_input("Deny with reason", "Reject with feedback sent to model", "reason", None),
     ]
-}
-
-async fn handle_edit_view(target: (&str, &Value), input: &str, ctx: &HostContext) -> Option<Flow> {
-    let (tool, args) = target;
-    let edited = ctx.input_with_default("Edit input (Esc cancels)", input, input).await?;
-    let trimmed = edited.trim();
-    let new_val = if trimmed.is_empty() { input } else { trimmed };
-    let new_args = apply_edited_input(tool, args, new_val);
-    Some(Flow::rewrite_args(new_args))
-}
-
-async fn handle_always_allow(tool: &str, default_rule: &str, ctx: &HostContext) -> Option<Flow> {
-    let prompt = format!("Rule pattern to save to permission.toml (surface: {tool})");
-    let pattern = ctx.input_with_default("Always allow", &prompt, default_rule).await?;
-    let trimmed = pattern.trim();
-    let chosen_rule = if trimmed.is_empty() { default_rule } else { trimmed };
-    save_rule(tool, chosen_rule);
-    Some(Flow::cont())
-}
-
-async fn handle_deny_prompt(ctx: &HostContext) -> Option<Flow> {
-    let reason = ctx.input("Deny with reason", "Reason sent to the model:").await?;
-    Some(format_user_denial(&reason))
 }
 
 fn format_user_denial(reason: &str) -> Flow {
