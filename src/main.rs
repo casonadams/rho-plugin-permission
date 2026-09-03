@@ -53,7 +53,7 @@ async fn prompt_and_resolve(tool: &str, args: &Value, ctx: &HostContext) -> Flow
     let options = prompt_options(&rule);
 
     loop {
-        match ctx.select("Permission Request", &body, &options, true).await {
+        match ctx.select("Permission Request", &body, &options, false).await {
             SelectResult::Selected(0) => return Flow::cont(),
             SelectResult::Selected(1) => {
                 if let Some(flow) = handle_edit_view((tool, args), &input, ctx).await {
@@ -70,8 +70,7 @@ async fn prompt_and_resolve(tool: &str, args: &Value, ctx: &HostContext) -> Flow
                     return flow;
                 }
             }
-            SelectResult::Custom(reason) => return format_user_denial(&reason),
-            SelectResult::Selected(_) | SelectResult::Cancelled => {
+            SelectResult::Selected(_) | SelectResult::Custom(_) | SelectResult::Cancelled => {
                 return Flow::skip(
                     "Permission denied by user. Do not retry this operation without explicit user request.",
                 );
@@ -126,7 +125,7 @@ async fn handle_always_allow(tool: &str, default_rule: &str, ctx: &HostContext) 
 }
 
 async fn handle_deny_prompt(ctx: &HostContext) -> Option<Flow> {
-    let reason = ctx.input("Deny Reason", "").await?;
+    let reason = ctx.input("Deny with reason", "Reason sent to the model:").await?;
     Some(format_user_denial(&reason))
 }
 

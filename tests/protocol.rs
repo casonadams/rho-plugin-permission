@@ -199,7 +199,7 @@ fn daemon_interactive_prompt_edit_view_rewrites_args() {
 }
 
 #[test]
-fn daemon_interactive_prompt_custom_text_denies_with_reason() {
+fn daemon_interactive_prompt_deny_with_reason_flow() {
     let dir = temp_dir("custom");
     let (mut child, mut stdin, mut stdout) = spawn(&dir);
 
@@ -214,12 +214,24 @@ fn daemon_interactive_prompt_custom_text_denies_with_reason() {
     );
     let request = read_line(&mut stdout);
     assert_eq!(request["method"], "host/ui/select");
+    assert_eq!(request["params"]["allow_custom"], false);
     let host_req_id = request["id"].as_u64().unwrap();
 
+    // Select "Deny with reason" (index 3)
     write_line(
         &mut stdin,
-        &json!({"jsonrpc": "2.0", "id": host_req_id, "result": {"custom": "tests are flaky, fix first"}}),
+        &json!({"jsonrpc": "2.0", "id": host_req_id, "result": {"selected": 3}}),
     );
+
+    // Plugin prompts for a reason to send to the model
+    let input_req = read_line(&mut stdout);
+    assert_eq!(input_req["method"], "host/ui/input");
+    let input_req_id = input_req["id"].as_u64().unwrap();
+    write_line(
+        &mut stdin,
+        &json!({"jsonrpc": "2.0", "id": input_req_id, "result": {"value": "tests are flaky, fix first"}}),
+    );
+
     let reply = read_line(&mut stdout);
     assert_eq!(reply["id"], 5);
     assert_eq!(reply["result"]["action"], "skip");
