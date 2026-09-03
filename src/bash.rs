@@ -213,7 +213,8 @@ fn is_path_token(token: &str) -> bool {
     if reject_non_path(token) {
         return false;
     }
-    token.starts_with('/')
+    token == "~"
+        || token.starts_with('/')
         || token.starts_with("~/")
         || token.starts_with('.')
         || token.contains('/')

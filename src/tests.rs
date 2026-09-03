@@ -173,6 +173,9 @@ fn bash_analyzer_command_and_paths() {
     let analysis = bash::analyze_bash_command("git status && cargo test");
     assert_eq!(analysis.commands, vec!["git status", "cargo test"]);
     assert!(!analysis.suspicious);
+
+    let analysis = bash::analyze_bash_command("ls ~");
+    assert_eq!(analysis.path_tokens, vec!["~"]);
 }
 
 #[test]
