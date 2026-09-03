@@ -219,6 +219,7 @@ fn redirection_always_asks_even_under_allow() {
 #[test]
 fn suggested_rules() {
     assert_eq!(suggested_rule("bash", "cargo test --nocapture"), "cargo test *");
+    assert_eq!(suggested_rule("bash", "cat /etc/hosts"), "cat *");
     assert_eq!(suggested_rule("bash", "ls"), "ls *");
     assert_eq!(suggested_rule("read", "src/main.rs"), "*");
     assert_eq!(suggested_rule("write", "/tmp/notes.txt"), "*");

@@ -200,8 +200,19 @@ pub(crate) fn has_redirection(command: &str) -> bool {
 pub fn suggested_rule(tool: &str, input: &str) -> String {
     match tool {
         "bash" => {
-            let prefix = input.split_whitespace().take(2).collect::<Vec<_>>().join(" ");
-            format!("{prefix} *")
+            let words: Vec<&str> = input.split_whitespace().collect();
+            if words.len() >= 2
+                && !words[1].starts_with('-')
+                && !words[1].starts_with('/')
+                && !words[1].starts_with('.')
+                && !words[1].contains('/')
+            {
+                format!("{} {} *", words[0], words[1])
+            } else if let Some(first) = words.first() {
+                format!("{first} *")
+            } else {
+                "*".to_string()
+            }
         }
         "fetch" => match input.split_once("://") {
             Some((scheme, rest)) => format!("{scheme}://{}/*", rest.split('/').next().unwrap_or_default()),

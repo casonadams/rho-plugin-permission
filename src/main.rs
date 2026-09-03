@@ -50,7 +50,7 @@ async fn prompt_and_resolve(tool: &str, args: &Value, ctx: &HostContext) -> Flow
     let input = permission::match_input(args);
     let rule = permission::suggested_rule(tool, &input);
     let body = format_prompt_body(tool, &input);
-    let options = prompt_options(tool, &rule);
+    let options = prompt_options(&rule);
 
     loop {
         match ctx.select("Permission Request", &body, &options, true).await {
@@ -88,15 +88,12 @@ fn format_prompt_body(tool: &str, input: &str) -> String {
     body
 }
 
-fn prompt_options(tool: &str, rule: &str) -> Vec<SelectOption> {
+fn prompt_options(rule: &str) -> Vec<SelectOption> {
     vec![
         SelectOption::with_description("Allow", "Execute this tool call once"),
-        SelectOption::with_description("Edit / View", "View or modify input before executing"),
-        SelectOption::with_description("Always allow", format!("Save rule '{tool}|{rule}' to permission.toml")),
-        SelectOption::with_description(
-            "Deny with reason",
-            "Enter a reason to send to the model; empty denies without one",
-        ),
+        SelectOption::with_description("Edit / View", "Modify command or arguments before executing"),
+        SelectOption::with_description("Always allow", format!("Save rule '{rule}' to permission.toml")),
+        SelectOption::with_description("Deny with reason", "Reject with feedback sent to model"),
     ]
 }
 
