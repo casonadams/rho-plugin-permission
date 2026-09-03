@@ -81,7 +81,17 @@ async fn prompt_and_resolve(tool: &str, args: &Value, ctx: &HostContext) -> Flow
 }
 
 fn format_prompt_body(tool: &str, input: &str) -> String {
-    let mut body = format!("{tool} {input}");
+    let mut body = match tool {
+        "bash" => {
+            let formatted = bash::format_command_lines(input);
+            if formatted.contains('\n') {
+                format!("bash:\n{formatted}")
+            } else {
+                format!("bash: {input}")
+            }
+        }
+        _ => format!("{tool} {input}"),
+    };
     if !permission::config_is_healthy() {
         body.push_str("\n(permission.toml is malformed - all rules are ignored until it is fixed)");
     }

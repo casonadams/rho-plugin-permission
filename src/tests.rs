@@ -179,6 +179,23 @@ fn bash_analyzer_command_and_paths() {
 }
 
 #[test]
+fn complex_commands_format_multiline_for_display() {
+    assert_eq!(
+        bash::format_command_lines("git status && cargo test || echo fallback ; ls -la"),
+        "git status\n  && cargo test\n  || echo fallback\n  ; ls -la"
+    );
+    // Single-line commands pass through unchanged.
+    assert_eq!(bash::format_command_lines("cargo test --lib"), "cargo test --lib");
+    // Quoted operators do not split lines.
+    assert_eq!(
+        bash::format_command_lines("grep \"a && b\" src/file.txt"),
+        "grep \"a && b\" src/file.txt"
+    );
+    // Newline-only commands pass through unchanged (no operators).
+    assert_eq!(bash::format_command_lines("ls\ncat foo"), "ls\ncat foo");
+}
+
+#[test]
 fn bash_commands_split_on_operators() {
     let segments = command_segments("bash", "git status && npm test | grep foo ; rm -rf tmp\nls");
     assert_eq!(segments, ["git status", "npm test", "grep foo", "rm -rf tmp", "ls"]);

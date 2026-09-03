@@ -20,6 +20,57 @@ struct SegmentAnalysis {
 
 const WRAPPERS: &[&str] = &["time", "nice", "nohup", "command", "builtin", "noglob"];
 
+/// Multi-line rendering of a compound command for display: each separator
+/// (`&&`, `||`, `;`, `|`) starts a continuation line led by the operator,
+/// indented two spaces. Commands without operators (including quoted ones)
+/// pass through unchanged.
+pub fn format_command_lines(command: &str) -> String {
+    let token_res = tokenize(command);
+    if token_res.tokens.is_empty() {
+        return command.to_string();
+    }
+    let has_operators = token_res
+        .tokens
+        .iter()
+        .any(|t| t.kind == TokenKind::Separator && t.raw != "\n");
+    if !has_operators {
+        return command.to_string();
+    }
+    let lines = operator_lines(&token_res.tokens);
+    if lines.len() > 1 {
+        lines
+            .iter()
+            .enumerate()
+            .map(|(i, line)| if i == 0 { line.clone() } else { format!("  {line}") })
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        command.to_string()
+    }
+}
+
+fn operator_lines(tokens: &[Token]) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
+    for token in tokens {
+        if token.kind == TokenKind::Separator {
+            if !current.is_empty() {
+                lines.push(current.join(" "));
+                current.clear();
+            }
+            if !token.raw.trim().is_empty() {
+                current.push(&token.raw);
+            }
+            continue;
+        }
+        current.push(&token.raw);
+    }
+    if !current.is_empty() {
+        lines.push(current.join(" "));
+    }
+    lines
+}
+
 pub fn analyze_bash_command(command: &str) -> BashAnalysis {
     let token_res = tokenize(command);
     let segments = split_segments(&token_res.tokens);
