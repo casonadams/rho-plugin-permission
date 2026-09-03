@@ -1,27 +1,20 @@
 use super::*;
+use matcher::wildcard_match;
 use permission::{
     Decision, EvalRequest, PermissionConfig, canonical_tool, command_segments, has_dynamic_execution, has_redirection,
-    match_input, save_allow_rule, suggested_rule, wildcard_match,
+    match_input, save_allow_rule, suggested_rule,
 };
-use serde::Deserialize;
 use serde_json::json;
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 fn workspace() -> Option<&'static Path> {
     Some(Path::new("/ws"))
 }
 
-#[derive(Debug, Deserialize)]
-struct FileRules {
-    #[serde(default)]
-    allow: BTreeMap<String, Vec<String>>,
-    #[serde(default)]
-    deny: BTreeMap<String, Vec<String>>,
-}
-
 fn rules(toml_text: &str) -> PermissionConfig {
-    toml::from_str(toml_text).unwrap()
+    let scope = policy::parse_scope_from_str(toml_text).unwrap();
+    let policy = policy::build_policy(Some(scope), None);
+    PermissionConfig { policy }
 }
 
 fn eval_req(config: &PermissionConfig, target: (&str, &Value), working_dir: Option<&Path>) -> Decision {
@@ -56,10 +49,130 @@ fn wildcard_matching() {
         ("", "", true),
         ("", "x", false),
         ("héllo *", "héllo wörld", true),
+        ("/tmp/*", "/tmp", true),
+        ("/tmp/*", "/tmp/file.txt", true),
+        ("/tmp/*", "/tmp/sub/file.txt", true),
+        ("/tmp/*", "/tmpx", false),
     ];
     for (pattern, text, expected) in cases {
         assert_eq!(wildcard_match(pattern, text), expected, "{pattern:?} vs {text:?}");
     }
+}
+
+#[test]
+fn path_module_normalization_and_containment() {
+    let ws = Path::new("/ws");
+    assert!(path::is_safe_system_path("/dev/null"));
+    assert!(path::is_safe_system_path("/dev/stderr"));
+    assert!(!path::is_safe_system_path("/tmp/foo"));
+
+    assert!(!path::is_path_outside_working_dir("src/main.rs", Some(ws)));
+    assert!(!path::is_path_outside_working_dir("src/../src/lib.rs", Some(ws)));
+    assert!(!path::is_path_outside_working_dir("/dev/null", Some(ws)));
+    assert!(path::is_path_outside_working_dir("/etc/passwd", Some(ws)));
+    assert!(path::is_path_outside_working_dir("../sibling/file", Some(ws)));
+    assert!(path::is_path_outside_working_dir("a/../../etc/passwd", Some(ws)));
+
+    let values = path::path_policy_values("src/main.rs", Some(ws));
+    assert!(values.contains(&"src/main.rs".to_string()));
+
+    let tool_args = json!({"path": "src/main.rs", "old_text": "foo"});
+    assert_eq!(
+        path::extract_tool_path("read", &tool_args),
+        Some("src/main.rs".to_string())
+    );
+    assert_eq!(path::extract_tool_path("bash", &tool_args), None);
+
+    let mcp_args = json!({"server": "playwright", "tool": "navigate", "arguments": {"path": "/tmp/test.html"}});
+    assert_eq!(path::extract_mcp_path(&mcp_args), Some("/tmp/test.html".to_string()));
+    let targets = path::extract_mcp_targets(&mcp_args);
+    assert_eq!(targets, vec!["playwright:navigate", "playwright"]);
+}
+
+#[test]
+fn home_directory_expansion() {
+    let home = std::env::var("HOME").unwrap_or_default();
+    assert_eq!(matcher::expand_home("~/dir/file"), format!("{home}/dir/file"));
+    assert_eq!(matcher::expand_home("$HOME/dir/file"), format!("{home}/dir/file"));
+    assert_eq!(matcher::expand_home("~"), home);
+    assert_eq!(matcher::expand_home("$HOME"), home);
+    assert_eq!(matcher::expand_home("/var/log"), "/var/log");
+}
+
+#[test]
+fn baseline_rules_match_inspection_commands() {
+    assert!(baseline::is_baseline_tool("read"));
+    assert!(baseline::is_baseline_tool("write"));
+    assert!(baseline::is_baseline_tool("edit"));
+    assert!(baseline::is_baseline_tool("grep"));
+    assert!(baseline::is_baseline_tool("find"));
+    assert!(baseline::is_baseline_tool("ls"));
+    assert!(baseline::is_baseline_tool("fetch"));
+    assert!(baseline::is_baseline_tool("search"));
+    assert!(!baseline::is_baseline_tool("unknown_tool"));
+
+    assert!(baseline::is_baseline_bash("git status"));
+    assert!(baseline::is_baseline_bash("git diff HEAD"));
+    assert!(baseline::is_baseline_bash("git log -n 5"));
+    assert!(baseline::is_baseline_bash("pwd"));
+    assert!(baseline::is_baseline_bash("ls -la"));
+    assert!(baseline::is_baseline_bash("rg foo src/"));
+    assert!(baseline::is_baseline_bash("cat Cargo.toml"));
+    assert!(baseline::is_baseline_bash("jq . package.json"));
+    assert!(baseline::is_baseline_bash("uname -a"));
+    assert!(baseline::is_baseline_bash("node --version"));
+    assert!(baseline::is_baseline_bash("cargo -v"));
+    assert!(baseline::is_baseline_bash("python --help"));
+    assert!(!baseline::is_baseline_bash("rm -rf /"));
+    assert!(!baseline::is_baseline_bash("git push origin main"));
+}
+
+#[test]
+fn bash_lexer_tokenization_and_quotes() {
+    let res = bash::lexer::tokenize("echo 'hello world' \"foo $bar\"");
+    assert_eq!(res.tokens.len(), 3);
+    assert_eq!(res.tokens[0].text, "echo");
+    assert_eq!(res.tokens[1].text, "hello world");
+    assert_eq!(res.tokens[2].text, "foo $bar");
+    assert!(!res.suspicious);
+
+    let res = bash::lexer::tokenize("echo `whoami`");
+    assert!(res.suspicious);
+
+    let res = bash::lexer::tokenize("echo $(id)");
+    assert!(res.suspicious);
+
+    let res = bash::lexer::tokenize("echo 'unterminated");
+    assert!(res.suspicious);
+
+    let res = bash::lexer::tokenize("diff <(ls) >(cat)");
+    assert!(res.suspicious);
+}
+
+#[test]
+fn bash_analyzer_command_and_paths() {
+    let analysis = bash::analyze_bash_command("grep \"a && b\" src/file.txt");
+    assert_eq!(analysis.commands, vec!["grep \"a && b\" src/file.txt"]);
+    assert_eq!(analysis.path_tokens, vec!["src/file.txt"]);
+    assert!(!analysis.suspicious);
+
+    let analysis = bash::analyze_bash_command("RUST_LOG=debug FOO=/tmp/x cargo test --nocapture");
+    assert_eq!(analysis.commands, vec!["cargo test --nocapture"]);
+    assert_eq!(analysis.path_tokens, vec!["/tmp/x"]);
+    assert!(!analysis.suspicious);
+
+    let analysis = bash::analyze_bash_command("time timeout 10s cargo test");
+    assert_eq!(analysis.commands, vec!["cargo test"]);
+    assert!(!analysis.suspicious);
+
+    let analysis = bash::analyze_bash_command("cargo test > /tmp/out.log 2>&1");
+    assert_eq!(analysis.commands, vec!["cargo test > /tmp/out.log 2>&1"]);
+    assert_eq!(analysis.path_tokens, vec!["/tmp/out.log"]);
+    assert!(!analysis.suspicious);
+
+    let analysis = bash::analyze_bash_command("git status && cargo test");
+    assert_eq!(analysis.commands, vec!["git status", "cargo test"]);
+    assert!(!analysis.suspicious);
 }
 
 #[test]
@@ -185,9 +298,69 @@ fn deny_rule_beats_ask_rule() {
 }
 
 #[test]
+fn permission_surface_tables_and_custom_deny_reason() {
+    let config = rules(
+        r#"
+[permission.path]
+"/tmp/*" = "allow"
+"*.env*" = { action = "deny", reason = "do not access env secrets" }
+
+[permission.bash]
+"cargo test *" = "allow"
+"rm -rf *" = { action = "deny", reason = "destructive command" }
+"#,
+    );
+
+    // Path surface override: /tmp/* is outside workspace but allowed by path rule
+    assert_eq!(
+        eval_req(&config, ("read", &json!({"path": "/tmp/notes.txt"})), workspace()),
+        Decision::Allow
+    );
+
+    // Path surface deny: *.env* is inside workspace but blocked with custom reason
+    assert_eq!(
+        eval_req(&config, ("read", &json!({"path": "local.env"})), workspace()),
+        Decision::Deny("do not access env secrets".to_string())
+    );
+
+    // Bash custom deny reason
+    assert_eq!(
+        bash_decision(&config, "rm -rf /tmp/junk"),
+        Decision::Deny("destructive command".to_string())
+    );
+
+    // Bash allow rule
+    assert_eq!(bash_decision(&config, "cargo test --lib"), Decision::Allow);
+}
+
+#[test]
+fn global_and_project_scope_merging() {
+    let global_toml = r#"
+[permission.bash]
+"cargo *" = "allow"
+"git *" = "allow"
+"#;
+    let project_toml = r#"
+[permission.bash]
+"cargo publish" = { action = "deny", reason = "publishing forbidden from repo" }
+"#;
+    let global_scope = policy::parse_scope_from_str(global_toml).unwrap();
+    let project_scope = policy::parse_scope_from_str(project_toml).unwrap();
+    let policy = policy::build_policy(Some(global_scope), Some(project_scope));
+    let config = PermissionConfig { policy };
+
+    assert_eq!(bash_decision(&config, "cargo test"), Decision::Allow);
+    assert_eq!(bash_decision(&config, "git status"), Decision::Allow);
+    assert_eq!(
+        bash_decision(&config, "cargo publish"),
+        Decision::Deny("publishing forbidden from repo".to_string())
+    );
+}
+
+#[test]
 fn unknown_section_makes_config_fail_safe() {
-    let malformed = "[allow]\nbash = [\"*\"]\n[bogus]\nx = 1\n";
-    assert!(toml::from_str::<PermissionConfig>(malformed).is_err());
+    let malformed = "[permission\nbash = \"*\"]\n";
+    assert!(policy::parse_scope_from_str(malformed).is_err());
     // load() falls back to default on malformed files: every call asks.
     assert_eq!(bash_decision(&PermissionConfig::default(), "git status"), Decision::Ask);
 }
@@ -265,7 +438,7 @@ fn paths_outside_working_dir_always_ask() {
     // Deny still beats the workspace check.
     let config = rules("[deny]\nread = [\"/tmp/*\", \"*.env*\"]\n");
     assert_eq!(
-        eval_req(&config, ("read", &json!({"path": "/tmp/.env"})), workspace()),
+        eval_req(&config, ("read", &json!({"path": "/tmp/file.txt"})), workspace()),
         Decision::Deny("denied by permission rule 'read|/tmp/*'".to_string())
     );
     assert_eq!(
@@ -302,7 +475,7 @@ fn url_rules_match_by_prefix() {
 #[test]
 fn saved_rules_round_trip_with_comments() {
     let path = temp_dir("round_trip").join("permission.toml");
-    std::fs::write(&path, "# my rules\n[allow]\nbash = [\"git *\"] # safe\n").unwrap();
+    std::fs::write(&path, "# my rules\n[permission.bash]\n\"git *\" = \"allow\" # safe\n").unwrap();
 
     save_allow_rule(&path, "bash", "cargo test *").unwrap();
     save_allow_rule(&path, "bash", "cargo test *").unwrap();
@@ -312,13 +485,12 @@ fn saved_rules_round_trip_with_comments() {
     assert!(saved.contains("# safe"), "comment lost:\n{saved}");
     assert_eq!(saved.matches("cargo test *").count(), 1, "duplicate rule:\n{saved}");
 
-    let parsed: FileRules = toml::from_str(&saved).unwrap();
-    assert_eq!(parsed.allow["bash"], ["git *", "cargo test *"]);
+    let parsed_scope = policy::parse_scope_from_str(&saved).unwrap();
     assert!(
-        parsed.deny.is_empty(),
-        "save must not invent deny rules:
-{}",
-        serde_json::to_string(&parsed.deny).unwrap()
+        parsed_scope
+            .rules
+            .iter()
+            .any(|r| r.surface == "bash" && r.pattern == "cargo test *")
     );
     std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }

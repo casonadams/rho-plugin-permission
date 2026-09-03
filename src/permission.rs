@@ -1,52 +1,13 @@
-use serde::Deserialize;
+use crate::bash::analyze_bash_command;
+use crate::path::{
+    extract_mcp_path, extract_mcp_targets, extract_tool_path, is_infrastructure_read, is_path_outside_working_dir,
+    path_policy_values,
+};
+use crate::policy::{PermissionState, Policy, PolicyRule, SurfaceDecision, SurfaceKind, decide_surface};
 use serde_json::Value;
-use std::collections::BTreeMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
-/// Lexical containment check: resolves `.` and `..` without touching the
-/// filesystem (write targets may not exist yet). Absolute paths must sit
-/// under the working dir; `~` is compared literally (rho's tools do not
-/// expand it either).
-fn contained(working_dir: &Path, input: &str) -> bool {
-    let path = Path::new(input);
-    let mut resolved: PathBuf = if path.is_absolute() {
-        PathBuf::new()
-    } else {
-        working_dir.to_path_buf()
-    };
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                resolved.pop();
-            }
-            component => resolved.push(component),
-        }
-    }
-    resolved.starts_with(working_dir)
-}
-
-/// Shell metacharacters that make a command unverifiable by static rules.
-const DYNAMIC_MARKERS: [&str; 4] = ["$(", "`", "<(", ">("];
-const OPERATOR_CHARS: [char; 4] = ['&', '|', ';', '\n'];
 const INPUT_KEYS: [&str; 4] = ["command", "url", "query", "path"];
-
-/// Tools whose `path` argument is confined to rho's working directory.
-const PATH_TOOLS: [&str; 3] = ["read", "write", "edit"];
-
-/// Rules from `~/.config/rho/permission.toml`: per-tool wildcard pattern lists.
-/// Evaluation is deny-first, then ask: deny beats ask beats allow. Unknown
-/// sections make the file malformed, so a typo'd config fails safe (all ask).
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PermissionConfig {
-    #[serde(default)]
-    allow: BTreeMap<String, Vec<String>>,
-    #[serde(default)]
-    ask: BTreeMap<String, Vec<String>>,
-    #[serde(default)]
-    deny: BTreeMap<String, Vec<String>>,
-}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Decision {
@@ -62,90 +23,153 @@ pub struct EvalRequest<'a> {
     pub working_dir: Option<&'a Path>,
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct PermissionConfig {
+    pub policy: Policy,
+}
+
 impl PermissionConfig {
-    /// A missing or malformed file means "no rules": every call asks.
-    pub fn load() -> Self {
-        config_path()
-            .and_then(|path| std::fs::read_to_string(path).ok())
-            .and_then(|raw| toml::from_str(&raw).ok())
-            .unwrap_or_default()
+    pub fn load_with_cwd(cwd: Option<&Path>) -> Self {
+        let (policy, _) = crate::policy::load_policy(cwd);
+        Self { policy }
     }
 
     pub fn evaluate(&self, req: EvalRequest<'_>) -> Decision {
+        decide_tool_call(&self.policy, req)
+    }
+}
+
+pub fn decide_tool_call(policy: &Policy, req: EvalRequest<'_>) -> Decision {
+    let components = if req.tool == "bash" {
+        bash_components(&policy.rules, req)
+    } else {
+        non_bash_components(&policy.rules, req)
+    };
+    fold_decisions(components)
+}
+
+fn bash_components(rules: &[PolicyRule], req: EvalRequest<'_>) -> Vec<Decision> {
+    let command = match_input(req.args);
+    let analysis = analyze_bash_command(&command);
+    let mut decisions = Vec::new();
+
+    for cmd in &analysis.commands {
+        let dec = decide_surface(rules, ("bash", std::slice::from_ref(cmd)), SurfaceKind::First);
+        decisions.push(map_surface_decision("bash", dec));
+    }
+    if analysis.suspicious {
+        decisions.push(Decision::Ask);
+    }
+    for token in &analysis.path_tokens {
+        decisions.push(eval_path_token(rules, token, req.working_dir));
+    }
+    decisions
+}
+
+fn non_bash_components(rules: &[PolicyRule], req: EvalRequest<'_>) -> Vec<Decision> {
+    let mut decisions = Vec::new();
+    if req.tool == "mcp" {
+        decisions.push(eval_mcp_surface(rules, req.args));
+    } else {
+        decisions.push(eval_tool_surface(rules, req));
+    }
+    let path_val = extract_tool_path(req.tool, req.args).or_else(|| extract_mcp_path(req.args));
+    if let Some(p) = path_val
+        && !is_infrastructure_read(req.tool, &p, req.working_dir)
+    {
+        decisions.push(eval_path_token(rules, &p, req.working_dir));
+    }
+    decisions
+}
+
+fn eval_mcp_surface(rules: &[PolicyRule], args: &Value) -> Decision {
+    let targets = extract_mcp_targets(args);
+    let vals = if targets.is_empty() {
+        vec!["*".to_string()]
+    } else {
+        targets
+    };
+    let dec = decide_surface(rules, ("mcp", &vals), SurfaceKind::First);
+    map_surface_decision("mcp", dec)
+}
+
+fn eval_tool_surface(rules: &[PolicyRule], req: EvalRequest<'_>) -> Decision {
+    let tool_path = extract_tool_path(req.tool, req.args);
+    let vals = if let Some(p) = tool_path {
+        path_policy_values(&p, req.working_dir)
+    } else {
         let input = match_input(req.args);
-        self.decide((req.tool, &input), req.working_dir)
-    }
-
-    /// Order: deny, then the workspace-escape ask, then explicit ask rules,
-    /// then allow. `working_dir` None (cwd unavailable) fails closed: path
-    /// tools always ask.
-    fn decide(&self, target: (&str, &str), working_dir: Option<&Path>) -> Decision {
-        let (tool, input) = target;
-        let segments = command_segments(tool, input);
-        if let Some(pattern) = first_match(&self.deny, tool, &segments) {
-            return Decision::Deny(format!("denied by permission rule '{tool}|{pattern}'"));
-        }
-        let escapes = PATH_TOOLS.contains(&tool) && !working_dir.is_some_and(|dir| contained(dir, input));
-        if escapes || first_match(&self.ask, tool, &segments).is_some() {
-            return Decision::Ask;
-        }
-        self.allow_decision(tool, input)
-    }
-
-    fn allow_decision(&self, tool: &str, input: &str) -> Decision {
-        let unverifiable = tool == "bash" && unverifiable_bash(input);
-        if unverifiable {
-            return Decision::Ask;
-        }
-        let segments = command_segments(tool, input);
-        if all_match(&self.allow, tool, &segments) {
-            Decision::Allow
+        if input.is_empty() {
+            vec!["*".to_string()]
         } else {
-            Decision::Ask
+            vec![input]
+        }
+    };
+    let dec = decide_surface(rules, (req.tool, &vals), SurfaceKind::First);
+    map_surface_decision(req.tool, dec)
+}
+
+fn eval_path_token(rules: &[PolicyRule], token: &str, cwd: Option<&Path>) -> Decision {
+    let vals = path_policy_values(token, cwd);
+    let dec = decide_surface(rules, ("path", &vals), SurfaceKind::Any);
+    if dec.matched_pattern.is_some() {
+        return map_surface_decision("path", dec);
+    }
+    if is_path_outside_working_dir(token, cwd) {
+        Decision::Ask
+    } else {
+        Decision::Allow
+    }
+}
+
+fn map_surface_decision(surface: &str, dec: SurfaceDecision) -> Decision {
+    match dec.state {
+        PermissionState::Allow => Decision::Allow,
+        PermissionState::Ask => Decision::Ask,
+        PermissionState::Deny => {
+            let reason = dec.reason.unwrap_or_else(|| {
+                if let Some(pat) = dec.matched_pattern {
+                    format!("denied by permission rule '{surface}|{pat}'")
+                } else {
+                    "denied by permission policy".to_string()
+                }
+            });
+            Decision::Deny(reason)
         }
     }
 }
 
-fn first_match(rules: &BTreeMap<String, Vec<String>>, tool: &str, segments: &[String]) -> Option<String> {
-    let patterns = rules.get(tool)?;
-    segments.iter().find_map(|segment| {
-        patterns
-            .iter()
-            .find(|pattern| wildcard_match(pattern, segment))
-            .cloned()
-    })
+fn fold_decisions(decisions: Vec<Decision>) -> Decision {
+    let mut has_ask = false;
+    for decision in decisions {
+        match decision {
+            Decision::Deny(reason) => return Decision::Deny(reason),
+            Decision::Ask => has_ask = true,
+            Decision::Allow => {}
+        }
+    }
+    if has_ask { Decision::Ask } else { Decision::Allow }
 }
 
-fn all_match(rules: &BTreeMap<String, Vec<String>>, tool: &str, segments: &[String]) -> bool {
-    rules.get(tool).is_some_and(|patterns| {
-        segments
-            .iter()
-            .all(|segment| patterns.iter().any(|pattern| wildcard_match(pattern, segment)))
-    })
-}
-
-/// Mirrors rho's `default_config_dir`: `RHO_HOME` is the config dir itself,
-/// otherwise `$HOME/.config/rho`.
-pub fn config_path() -> Option<PathBuf> {
+pub fn config_dir() -> Option<PathBuf> {
     if let Ok(dir) = std::env::var("RHO_HOME") {
-        return Some(PathBuf::from(dir).join("permission.toml"));
+        return Some(PathBuf::from(dir));
     }
     std::env::var("HOME")
         .ok()
-        .map(|home| PathBuf::from(home).join(".config/rho/permission.toml"))
+        .map(|home| PathBuf::from(home).join(".config/rho"))
 }
 
-/// A missing file is fine (no rules: everything asks); a malformed one also
-/// makes load() ignore every rule, which is invisible otherwise — rho
-/// discards plugin stderr, so prompts are the only place to say so.
+pub fn config_path() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join("permission.toml"))
+}
+
 pub fn config_is_healthy() -> bool {
-    config_path()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .is_none_or(|raw| toml::from_str::<PermissionConfig>(&raw).is_ok())
+    let cwd = std::env::current_dir().ok();
+    let (_, healthy) = crate::policy::load_policy(cwd.as_deref());
+    healthy
 }
 
-/// The string a tool's arguments are matched against. Falls back to the JSON
-/// dump so unknown tools still match `*`-style rules.
 pub(crate) fn match_input(args: &Value) -> String {
     for key in INPUT_KEYS {
         if let Some(Value::String(value)) = args.get(key) {
@@ -155,78 +179,24 @@ pub(crate) fn match_input(args: &Value) -> String {
     serde_json::to_string(args).unwrap_or_default()
 }
 
-/// Splits a bash command on `&&`, `||`, `;`, `|`, `&`, and newlines so every
-/// subcommand must pass a rule. ponytail: no quote handling, so quoted
-/// operators split too; that only adds segments (fail-closed prompts).
+#[cfg(test)]
 pub(crate) fn command_segments(tool: &str, input: &str) -> Vec<String> {
     if tool != "bash" {
         return vec![input.to_string()];
     }
-    input
-        .split(OPERATOR_CHARS)
-        .map(str::trim)
-        .filter(|segment| !segment.is_empty())
-        .map(String::from)
-        .collect()
+    analyze_bash_command(input).commands
 }
 
+#[cfg(test)]
 pub(crate) fn has_dynamic_execution(command: &str) -> bool {
-    DYNAMIC_MARKERS.iter().any(|marker| command.contains(marker))
+    analyze_bash_command(command).suspicious
 }
 
-/// Wildcard rules cannot know what a bash command touches when it redirects
-/// output: `>` and `>>` write files, `&>` writes both streams. Only fd dups
-/// (`2>&1`, `>&2`) are safe. A quoted `>` also asks — fail-closed, same as
-/// quoted operators in `command_segments`.
+#[cfg(test)]
 pub(crate) fn has_redirection(command: &str) -> bool {
-    let bytes = command.as_bytes();
-    (0..bytes.len()).any(|index| bytes[index] == b'>' && !is_fd_dup(bytes, index))
+    crate::bash::has_file_redirection(command)
 }
 
-fn is_fd_dup(bytes: &[u8], index: usize) -> bool {
-    bytes.get(index + 1) == Some(&b'&') && bytes.get(index + 2).is_some_and(|byte| byte.is_ascii_digit())
-}
-
-/// A bash command under a wildcard allow rule must be fully verifiable:
-/// non-empty, no dynamic execution, no file redirection.
-fn unverifiable_bash(command: &str) -> bool {
-    command_segments("bash", command).is_empty() || has_dynamic_execution(command) || has_redirection(command)
-}
-
-/// `*` matches any sequence, `?` matches one character. A trailing " *" also
-/// matches the bare prefix (`git status *` matches `git status`), matching
-/// Claude Code's `:*` semantics so one saved rule covers both forms.
-pub fn wildcard_match(pattern: &str, text: &str) -> bool {
-    if let Some(prefix) = pattern.strip_suffix(" *") {
-        return text == prefix || text.strip_prefix(prefix).is_some_and(|rest| rest.starts_with(' '));
-    }
-    generic_wildcard(pattern, text)
-}
-
-fn generic_wildcard(pattern: &str, text: &str) -> bool {
-    let pattern: Vec<char> = pattern.chars().collect();
-    let text: Vec<char> = text.chars().collect();
-    let (mut star, mut star_at) = (None, 0usize);
-    let (mut pi, mut ti) = (0usize, 0usize);
-    while ti < text.len() {
-        if pi < pattern.len() && (pattern[pi] == '?' || pattern[pi] == text[ti]) {
-            (pi, ti) = (pi + 1, ti + 1);
-        } else if pi < pattern.len() && pattern[pi] == '*' {
-            star = Some(pi);
-            star_at = ti;
-            pi += 1;
-        } else if let Some(sp) = star {
-            star_at += 1;
-            (pi, ti) = (sp + 1, star_at);
-        } else {
-            return false;
-        }
-    }
-    pattern[pi..].iter().all(|&c| c == '*')
-}
-
-/// Rule offered by "always allow": bash → program + subcommand prefix;
-/// fetch → URL origin; everything else `*`.
 pub fn suggested_rule(tool: &str, input: &str) -> String {
     match tool {
         "bash" => {
@@ -241,8 +211,6 @@ pub fn suggested_rule(tool: &str, input: &str) -> String {
     }
 }
 
-/// rho registers alias spellings for the web tools; rules key on the canonical
-/// name so one rule covers every alias the model might call.
 pub fn canonical_tool(tool: &str) -> &str {
     match tool {
         "webfetch" | "web_fetch" => "fetch",
@@ -251,32 +219,36 @@ pub fn canonical_tool(tool: &str) -> &str {
     }
 }
 
-/// Appends the rule to `[allow]` in place. toml_edit keeps every comment and
-/// formatting choice the user made; a malformed file is left untouched.
 pub fn save_allow_rule(path: &Path, tool: &str, pattern: &str) -> Result<(), String> {
     let raw = std::fs::read_to_string(path).unwrap_or_default();
     let mut doc = raw
         .parse::<toml_edit::DocumentMut>()
         .map_err(|error| format!("permission.toml is malformed: {error}"))?;
-    let allow = allow_table(&mut doc)?;
-    if allow.get(tool).is_none() {
-        allow[tool] = toml_edit::Item::Value(toml_edit::Value::Array(toml_edit::Array::new()));
+
+    let perm_table = ensure_permission_table(&mut doc)?;
+    let surface_item = perm_table
+        .entry(tool)
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+
+    if let Some(table) = surface_item.as_table_mut() {
+        table[pattern] = toml_edit::value("allow");
+    } else if let Some(val) = surface_item.as_value_mut() {
+        if pattern == "*" {
+            *val = toml_edit::Value::from("allow");
+        } else {
+            let mut new_table = toml_edit::Table::new();
+            new_table[pattern] = toml_edit::value("allow");
+            *surface_item = toml_edit::Item::Table(new_table);
+        }
     }
-    let array = allow[tool]
-        .as_array_mut()
-        .ok_or_else(|| format!("[allow].{tool} in permission.toml is not a list"))?;
-    if array.iter().any(|value| value.as_str() == Some(pattern)) {
-        return Ok(());
-    }
-    array.push(pattern);
     std::fs::write(path, doc.to_string()).map_err(|error| error.to_string())
 }
 
-fn allow_table(doc: &mut toml_edit::DocumentMut) -> Result<&mut toml_edit::Table, String> {
-    if doc.get("allow").is_none_or(toml_edit::Item::is_none) {
-        doc["allow"] = toml_edit::Item::Table(toml_edit::Table::new());
+fn ensure_permission_table(doc: &mut toml_edit::DocumentMut) -> Result<&mut toml_edit::Table, String> {
+    if doc.get("permission").is_none_or(toml_edit::Item::is_none) {
+        doc["permission"] = toml_edit::Item::Table(toml_edit::Table::new());
     }
-    doc["allow"]
+    doc["permission"]
         .as_table_mut()
-        .ok_or_else(|| "[allow] in permission.toml is not a table".to_string())
+        .ok_or_else(|| "[permission] in permission.toml is not a table".to_string())
 }

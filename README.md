@@ -1,8 +1,7 @@
 # rho-plugin-permission
 
 Permission system for [rho](https://github.com/casonadams/rho), as a plugin:
-allow/deny rules in `~/.config/rho/permission.toml` plus an interactive prompt
-for everything else.
+allow/deny rules in `permission.toml` plus an interactive prompt for everything else.
 
 ## Install
 
@@ -48,72 +47,56 @@ once: cargo-installs from crates.io and registers the plugin by command.
 
 ## Configuration
 
-`~/.config/rho/permission.toml` (honors `RHO_HOME`). Sections are checked in
-order `deny` → `ask` → `allow`; rules are keyed by tool name and matched against
-the tool's primary argument:
+Policy is loaded from these files in order (project rules override global rules):
+1. Global: `~/.config/rho/permission.toml` (honors `RHO_HOME`)
+2. Project: `<project>/.rho/permission.toml` (or `<project>/.config/rho/permission.toml`)
 
-| Tool                                                                                     | Rule matches                                                                                                                  |
-| ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `bash`                                                                                   | each subcommand after splitting on `&&`, `\|\|`, `;`, `\|`, `&`, newlines                                                     |
-| `read`, `write`, `edit`                                                                  | the `path` argument                                                                                                           |
-| `fetch` (also `webfetch`, `web_fetch`)                                                   | the `url` argument                                                                                                            |
-| `search` (also `websearch`, `web_search`)                                                | the `query` argument                                                                                                          |
-| any other tool — MCP tools are named `<server>_<tool>` (e.g. `playwright_browser_click`) | the serialized arguments JSON, or the `url`/`path`/`query`/`command` argument if present — only `*`-style rules are practical |
+Rules are organized by surface under `[permission.<surface>]`:
+
+| Surface | Rule matches |
+| ------- | ------------ |
+| `path` | Every detected file path across tools, bash arguments, redirects, and MCP |
+| `bash` | Full command (compound commands: each subcommand after quote-aware splitting) |
+| `mcp` | MCP server (`playwright`) or server:tool (`playwright:navigate`) |
+| `<tool>` (`read`, `write`, `edit`, `fetch`, `search`, ...) | Tool-specific inputs |
+| `*` | Universal fallback for unmatched surfaces |
 
 ```toml
-[allow]
-bash = [
-  "git *",
-  "cargo *",
-  "npm run *"
-]
-read = ["src/*", "tests/*"]        # `*` crosses `/`: covers the subtree
-edit = ["src/*"]
-fetch = ["https://docs.rs/*"]
+[permission]
+"*" = "ask"
 
-[ask]
-bash = [
-  "cat secret *"
-]
-fetch = ["http://*"]               # plain http always asks
+[permission.path]
+"/tmp/*" = "allow"
+"*.env*" = { action = "deny", reason = "do not read secrets" }
+"~/.ssh/*" = { action = "deny", reason = "do not access ssh keys" }
 
-[deny]
-bash = [
-  "rm -rf *",
-  "git push --force *"
-]
-read = ["*.env", "*.env*"]          # leading `*` so absolute paths match too
+[permission.bash]
+"rm -rf *" = { action = "deny", reason = "destructive command" }
+"git push --force *" = { action = "deny", reason = "destructive command" }
+
+[permission.fetch]
+"https://docs.rs/*" = "allow"
+"http://*" = "ask"
 ```
 
-- `*` matches any sequence (including `/`), `?` one character. Write path rules
-  in the same form the model passes them — workspace-relative like `src/*` or
-  absolute like `/Users/me/project/*`.
-- A malformed file is ignored entirely — every call asks, saves are refused, and
-  the prompt body tells you the file is malformed. (A missing file is normal:
-  same all-ask behavior, no warning.)
-- Deny rules win over ask rules, which win over allow rules — an `[ask]` rule
-  prompts even when an allow rule would match. Anything unmatched asks too.
-- Commands with `$(`, backticks, or process substitution always ask — rules
-  cannot verify what they run. Missing or malformed file: every call asks.
-- "Always allow" saves `prog sub *` for bash, the URL origin for fetch, and `*`
-  (all calls of that tool) for everything else — deny and ask rules still
-  override it.
+- **Built-in smart defaults**: Standard read-only inspection commands (`git status`, `git diff`, `git log`, `ls`, `pwd`, `grep`, `cat`, `jq`, `* --version`, `* --help`) and workspace operations default to `allow`.
+- **Path security**: Any file access inside the workspace defaults to `allow`. Files outside the workspace default to `ask` unless permitted by a `permission.path` rule (e.g. `"/tmp/*" = "allow"`).
+- **Bash safety**: Commands are tokenized with quote-awareness; environment variables (`FOO=1 cmd`) and wrappers (`time`, `nice`, `timeout`) are stripped before matching. Commands with dynamic execution (`$(...)`, backticks, `<(...)`, `>(...)`, unbalanced quotes) always prompt.
+- **Custom deny reasons**: Specify `{ action = "deny", reason = "..." }` to give the AI model clear instructions when an action is rejected.
+- **Always allow**: Saves the suggested pattern to `permission.toml` (to project file if one exists, else global), preserving comments and formatting with `toml_edit`.
 
 ## How it works
 
-The plugin operates as a long-running JSON-RPC 2.0 daemon (and supports legacy one-shot tool hooks) for `rho`:
+The plugin operates as a JSON-RPC 2.0 daemon for `rho`:
 
-1. **Rule match** — allow rules proceed with `{"action": "continue"}` without prompting; deny rules return `{"action": "skip", "reason": "..."}` with the rule as the reason.
-2. **No match** — the plugin calls `host/ui/select` (or `ui/prompt`) to show a permission modal in `rho`'s terminal with **Allow**, **Always allow**
-   (saves the suggested rule to `permission.toml`, preserving your comments and
-   formatting), or **Deny with reason** — Enter opens a reason input; submitting
-   one sends it to the model, an empty submit denies without a reason. Esc
-   always denies immediately.
-3. Saved rules take effect immediately for the rest of the session and all
-   future sessions.
+1. **Rule match** — allowed calls proceed silently with `{"action": "continue"}`; denied calls return `{"action": "skip", "reason": "..."}` with the custom or rule reason.
+2. **No match** — prompts the user via `host/ui/select` with **Allow**, **Always allow**, or **Deny with reason**.
+3. Saved rules take effect immediately for the rest of the session and future sessions.
 
 ## Development
 
 ```sh
 cargo test
+cargo clippy --all-targets
+cargo fmt --check
 ```
