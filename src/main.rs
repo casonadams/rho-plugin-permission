@@ -38,19 +38,46 @@ impl Plugin for PermissionPlugin {
             working_dir: working_dir.as_deref(),
         };
 
-        match PermissionConfig::load_with_cwd(working_dir.as_deref()).evaluate(req) {
+        let config = PermissionConfig::load_with_cwd(working_dir.as_deref());
+        match config.evaluate(req) {
             Decision::Allow => Flow::cont(),
             Decision::Deny(reason) => Flow::skip(reason),
-            Decision::Ask => prompt_and_resolve(tool, &args, ctx).await,
+            Decision::Ask => {
+                let drafts = permission::ask_drafts(&config.policy, req);
+                let ask = AskContext {
+                    tool,
+                    args: &args,
+                    drafts: &drafts,
+                };
+                prompt_and_resolve(ask, ctx).await
+            }
         }
     }
 }
 
-async fn prompt_and_resolve(tool: &str, args: &Value, ctx: &HostContext) -> Flow {
-    let input = permission::match_input(args);
-    let rule = permission::suggested_rule(tool, &input);
-    let body = format_prompt_body(tool, &input);
-    let options = prompt_options(&rule, &input);
+struct AskContext<'a> {
+    tool: &'a str,
+    args: &'a Value,
+    drafts: &'a [permission::RuleDraft],
+}
+
+async fn prompt_and_resolve(ask: AskContext<'_>, ctx: &HostContext) -> Flow {
+    let tool = ask.tool;
+    let input = permission::match_input(ask.args);
+    let pattern_prefill = match ask.drafts {
+        [] => permission::suggested_rule(tool, &input),
+        [draft] => draft.pattern.clone(),
+        many => many
+            .iter()
+            .map(|d| format!("{}: {}", d.surface, d.pattern))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    let mut body = format_prompt_body(tool, &input);
+    for draft in ask.drafts.iter().filter(|d| d.surface == "path") {
+        body.push_str(&format!("\npath: {}", draft.value));
+    }
+    let options = prompt_options(&pattern_prefill, &input);
 
     loop {
         match ctx.select("Permission Request", &body, &options, false).await {
@@ -59,12 +86,11 @@ async fn prompt_and_resolve(tool: &str, args: &Value, ctx: &HostContext) -> Flow
                 1 => {
                     let trimmed = text.trim();
                     let edited = if trimmed.is_empty() { &input } else { trimmed };
-                    return Flow::rewrite_args(apply_edited_input(tool, args, edited));
+                    return Flow::rewrite_args(apply_edited_input(tool, ask.args, edited));
                 }
                 2 => {
-                    let trimmed = text.trim();
-                    let rule = if trimmed.is_empty() { &rule } else { trimmed };
-                    save_rule(tool, rule);
+                    let fallback = ask.drafts.first().map(|d| d.surface.as_str()).unwrap_or(tool);
+                    save_rules(&text, fallback);
                     return Flow::cont();
                 }
                 3 => return format_user_denial(&text),
@@ -144,14 +170,40 @@ fn apply_edited_input(tool: &str, args: &Value, edited: &str) -> Value {
     Value::Object(obj)
 }
 
-fn save_rule(tool: &str, rule: &str) {
+fn save_rules(text: &str, fallback_surface: &str) {
     let working_dir = std::env::current_dir().ok();
-    let surface = permission::rule_surface(tool);
-    if let Some(path) = policy::target_config_path(working_dir.as_deref())
-        && let Err(error) = permission::save_allow_rule(&path, surface, rule)
-    {
-        eprintln!("rho-plugin-permission: could not save rule: {error}");
+    let Some(path) = policy::target_config_path(working_dir.as_deref()) else {
+        return;
+    };
+    for (surface, pattern) in parse_saved_rules(text, fallback_surface) {
+        if let Err(error) = permission::save_allow_rule(&path, &surface, &pattern) {
+            eprintln!("rho-plugin-permission: could not save rule: {error}");
+        }
     }
+}
+
+/// Parses the always-allow pattern text: multi-draft prefills use
+/// `surface: pattern` lines; a bare line belongs to the fallback surface.
+fn parse_saved_rules(text: &str, fallback_surface: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            if let Some((surface, pattern)) = line.split_once(": ")
+                && is_surface_token(surface)
+                && !pattern.trim().is_empty()
+            {
+                return Some((surface.to_string(), pattern.trim().to_string()));
+            }
+            Some((fallback_surface.to_string(), line.to_string()))
+        })
+        .collect()
+}
+
+fn is_surface_token(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 #[tokio::main]

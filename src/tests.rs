@@ -2,7 +2,7 @@ use super::*;
 use matcher::wildcard_match;
 use permission::{
     Decision, EvalRequest, PermissionConfig, canonical_tool, command_segments, has_dynamic_execution, has_redirection,
-    match_input, rule_surface, save_allow_rule, suggested_rule,
+    match_input, save_allow_rule, suggested_rule,
 };
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -244,11 +244,11 @@ fn suggested_rules() {
     assert_eq!(suggested_rule("read", "src/main.rs"), "src/main.rs/*");
     assert_eq!(suggested_rule("write", "/tmp/notes.txt"), "/tmp/notes.txt/*");
     assert_eq!(suggested_rule("read", "/etc/hosts"), "/etc/hosts/*");
-    assert_eq!(rule_surface("read"), "path");
-    assert_eq!(rule_surface("write"), "path");
-    assert_eq!(rule_surface("edit"), "path");
-    assert_eq!(rule_surface("bash"), "bash");
-    assert_eq!(rule_surface("fetch"), "fetch");
+    assert_eq!(suggested_rule("bash", "cargo test"), "cargo test *");
+    assert_eq!(
+        suggested_rule("fetch", "https://github.com/x/y?z=1"),
+        "https://github.com/*"
+    );
     assert_eq!(
         suggested_rule("fetch", "https://github.com/x/y?z=1"),
         "https://github.com/*"
@@ -520,6 +520,46 @@ fn saved_rules_round_trip_with_comments() {
             .any(|r| r.surface == "bash" && r.pattern == "cargo test *")
     );
     std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn ask_drafts_target_the_components_that_asked() {
+    let config = rules("");
+    let drafts_for = |tool: &str, args: &Value| {
+        permission::ask_drafts(
+            &config.policy,
+            EvalRequest {
+                tool,
+                args,
+                working_dir: workspace(),
+            },
+        )
+    };
+
+    // Benign baseline command + outside path: only the path needs permission.
+    let drafts = drafts_for("bash", &json!({"command": "cat /etc/hosts"}));
+    assert_eq!(drafts.len(), 1);
+    assert_eq!(drafts[0].surface, "path");
+    assert_eq!(drafts[0].pattern, "/etc/hosts/*");
+    assert_eq!(drafts[0].value, "/etc/hosts");
+
+    // Command not covered by any rule + outside path: both draft.
+    let drafts = drafts_for("bash", &json!({"command": "python3 /tmp/gen.py"}));
+    assert_eq!(drafts.len(), 2);
+    assert_eq!(drafts[0].surface, "bash");
+    assert_eq!(drafts[0].pattern, "python3 /tmp/gen.py");
+    assert_eq!(drafts[1].surface, "path");
+    assert_eq!(drafts[1].pattern, "/tmp/gen.py/*");
+
+    // Path tool: the path component drafts (the tool itself is baseline-allowed).
+    let drafts = drafts_for("read", &json!({"path": "/etc/hosts"}));
+    assert_eq!(drafts.len(), 1);
+    assert_eq!(drafts[0].surface, "path");
+    assert_eq!(drafts[0].pattern, "/etc/hosts/*");
+
+    // Inside-workspace path asks nothing.
+    let drafts = drafts_for("bash", &json!({"command": "cat src/main.rs"}));
+    assert!(drafts.is_empty());
 }
 
 #[test]

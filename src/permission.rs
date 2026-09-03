@@ -39,86 +39,144 @@ impl PermissionConfig {
     }
 }
 
+pub struct RuleDraft {
+    pub surface: String,
+    pub pattern: String,
+    pub value: String,
+}
+
+struct Component {
+    surface: String,
+    value: String,
+    decision: Decision,
+}
+
 pub fn decide_tool_call(policy: &Policy, req: EvalRequest<'_>) -> Decision {
-    let components = if req.tool == "bash" {
+    fold_decisions(components(policy, req).into_iter().map(|c| c.decision).collect())
+}
+
+/// Drafts for "Always allow": one per component that resolved to Ask. Path
+/// asks draft a path rule (covering every tool touching that path), command
+/// asks draft the command itself for the user to generalize.
+pub fn ask_drafts(policy: &Policy, req: EvalRequest<'_>) -> Vec<RuleDraft> {
+    components(policy, req)
+        .into_iter()
+        .filter(|c| matches!(c.decision, Decision::Ask))
+        .map(draft_for)
+        .collect()
+}
+
+fn draft_for(component: Component) -> RuleDraft {
+    let Component { surface, value, .. } = component;
+    match surface.as_str() {
+        "path" => RuleDraft {
+            surface: "path".into(),
+            pattern: format!("{value}/*"),
+            value,
+        },
+        "bash" | "mcp" => RuleDraft {
+            surface: surface.clone(),
+            pattern: value.clone(),
+            value,
+        },
+        tool => RuleDraft {
+            surface: tool.into(),
+            pattern: suggested_rule(tool, &value),
+            value,
+        },
+    }
+}
+
+fn components(policy: &Policy, req: EvalRequest<'_>) -> Vec<Component> {
+    if req.tool == "bash" {
         bash_components(&policy.rules, req)
     } else {
         non_bash_components(&policy.rules, req)
-    };
-    fold_decisions(components)
+    }
 }
 
-fn bash_components(rules: &[PolicyRule], req: EvalRequest<'_>) -> Vec<Decision> {
+fn bash_components(rules: &[PolicyRule], req: EvalRequest<'_>) -> Vec<Component> {
     let command = match_input(req.args);
     let analysis = analyze_bash_command(&command);
-    let mut decisions = Vec::new();
+    let mut components = Vec::new();
 
     for cmd in &analysis.commands {
         let dec = decide_surface(rules, ("bash", std::slice::from_ref(cmd)), SurfaceKind::First);
-        decisions.push(map_surface_decision("bash", dec));
+        components.push(Component {
+            surface: "bash".into(),
+            value: cmd.clone(),
+            decision: map_surface_decision("bash", dec),
+        });
     }
     if analysis.suspicious {
-        decisions.push(Decision::Ask);
+        components.push(Component {
+            surface: "bash".into(),
+            value: command,
+            decision: Decision::Ask,
+        });
     }
     for token in &analysis.path_tokens {
-        decisions.push(eval_path_token(rules, token, req.working_dir));
+        components.push(path_component(rules, token, req.working_dir));
     }
-    decisions
+    components
 }
 
-fn non_bash_components(rules: &[PolicyRule], req: EvalRequest<'_>) -> Vec<Decision> {
-    let mut decisions = Vec::new();
+fn non_bash_components(rules: &[PolicyRule], req: EvalRequest<'_>) -> Vec<Component> {
+    let mut components = Vec::new();
     if req.tool == "mcp" {
-        decisions.push(eval_mcp_surface(rules, req.args));
+        let targets = extract_mcp_targets(req.args);
+        let vals = if targets.is_empty() {
+            vec!["*".to_string()]
+        } else {
+            targets.clone()
+        };
+        let dec = decide_surface(rules, ("mcp", &vals), SurfaceKind::First);
+        components.push(Component {
+            surface: "mcp".into(),
+            value: targets.first().cloned().unwrap_or_else(|| "*".to_string()),
+            decision: map_surface_decision("mcp", dec),
+        });
     } else {
-        decisions.push(eval_tool_surface(rules, req));
+        let tool_path = extract_tool_path(req.tool, req.args);
+        let input = match_input(req.args);
+        let value = tool_path
+            .clone()
+            .unwrap_or_else(|| if input.is_empty() { "*".to_string() } else { input });
+        let vals = match &tool_path {
+            Some(p) => path_policy_values(p, req.working_dir),
+            None if value == "*" => vec!["*".to_string()],
+            None => vec![value.clone()],
+        };
+        let dec = decide_surface(rules, (req.tool, &vals), SurfaceKind::First);
+        components.push(Component {
+            surface: req.tool.into(),
+            value,
+            decision: map_surface_decision(req.tool, dec),
+        });
     }
     let path_val = extract_tool_path(req.tool, req.args).or_else(|| extract_mcp_path(req.args));
     if let Some(p) = path_val
         && !is_infrastructure_read(req.tool, &p, req.working_dir)
     {
-        decisions.push(eval_path_token(rules, &p, req.working_dir));
+        components.push(path_component(rules, &p, req.working_dir));
     }
-    decisions
+    components
 }
 
-fn eval_mcp_surface(rules: &[PolicyRule], args: &Value) -> Decision {
-    let targets = extract_mcp_targets(args);
-    let vals = if targets.is_empty() {
-        vec!["*".to_string()]
-    } else {
-        targets
-    };
-    let dec = decide_surface(rules, ("mcp", &vals), SurfaceKind::First);
-    map_surface_decision("mcp", dec)
-}
-
-fn eval_tool_surface(rules: &[PolicyRule], req: EvalRequest<'_>) -> Decision {
-    let tool_path = extract_tool_path(req.tool, req.args);
-    let vals = if let Some(p) = tool_path {
-        path_policy_values(&p, req.working_dir)
-    } else {
-        let input = match_input(req.args);
-        if input.is_empty() {
-            vec!["*".to_string()]
-        } else {
-            vec![input]
-        }
-    };
-    let dec = decide_surface(rules, (req.tool, &vals), SurfaceKind::First);
-    map_surface_decision(req.tool, dec)
-}
-
-fn eval_path_token(rules: &[PolicyRule], token: &str, cwd: Option<&Path>) -> Decision {
+fn path_component(rules: &[PolicyRule], token: &str, cwd: Option<&Path>) -> Component {
     let vals = path_policy_values(token, cwd);
     let dec = decide_surface(rules, ("path", &vals), SurfaceKind::Any);
-    if dec.matched_pattern.is_some() {
-        return map_surface_decision("path", dec);
-    }
-    if is_path_outside_working_dir(token, cwd) {
+    let decision = if dec.matched_pattern.is_some() {
+        map_surface_decision("path", dec)
+    } else if is_path_outside_working_dir(token, cwd) {
         Decision::Ask
     } else {
         Decision::Allow
+    };
+    Component {
+        surface: "path".into(),
+        value: token.to_string(),
+        decision,
     }
 }
 
@@ -223,16 +281,6 @@ pub fn suggested_rule(tool: &str, input: &str) -> String {
         // workspace-escape ask.
         "read" | "write" | "edit" => format!("{input}/*"),
         _ => "*".to_string(),
-    }
-}
-
-/// Surface a saved rule belongs to: path-tool rules go on the cross-cutting
-/// `path` surface so they govern every tool touching that path.
-pub fn rule_surface(tool: &str) -> &str {
-    if matches!(tool, "read" | "write" | "edit") {
-        "path"
-    } else {
-        tool
     }
 }
 
