@@ -93,6 +93,8 @@ dependencies = [
 [[package]]
 name = "rho-plugin-sdk"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0afed1159e1e51ab90904e179d24905b059debe60273b932f3010c987e72a959"
 dependencies = [
  "async-trait",
  "serde",
