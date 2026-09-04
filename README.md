@@ -27,9 +27,14 @@ path = "/Users/you/.config/rho/plugins/rho-plugin-permission"   # absolute: ~ is
 enabled = true
 ```
 
-Or `cargo install rho-plugin-permission` from
-[crates.io](https://crates.io/crates/rho-plugin-permission) and register it by
-command:
+Or install from [crates.io](https://crates.io/crates/rho-plugin-permission) with
+`cargo install rho-plugin-permission`:
+
+```sh
+cargo install rho-plugin-permission
+```
+
+and register it by command in `~/.config/rho/config.toml`:
 
 ```toml
 # ~/.config/rho/config.toml
@@ -43,7 +48,8 @@ the absolute `path` form instead:
 `path = "/Users/you/.cargo/bin/rho-plugin-permission"`.
 
 `rho plugin install rho-plugin-permission` (current rho) does both steps at
-once: cargo-installs from crates.io and registers the plugin by command.
+once: cargo-installs from crates.io and registers the plugin by command. You can
+also run `cargo install rho-plugin-permission` directly as well.
 
 ## Configuration
 
