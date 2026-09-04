@@ -5,6 +5,8 @@ pub const BASELINE_TOOLS: &[&str] = &[
     "ls",
     "grep",
     "find",
+    "fd",
+    "rg",
     "fetch",
     "search",
     "todo",

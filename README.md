@@ -58,7 +58,7 @@ Rules are organized by surface under `[permission.<surface>]`:
 | `path` | Every detected file path across tools, bash arguments, redirects, and MCP |
 | `bash` | Full command (compound commands: each subcommand after quote-aware splitting) |
 | `mcp` | MCP server (`playwright`) or server:tool (`playwright:navigate`) |
-| `<tool>` (`read`, `write`, `edit`, `fetch`, `search`, ...) | Tool-specific inputs |
+| `<tool>` (`read`, `write`, `edit`, `fd`, `rg`, `fetch`/`web_fetch`, `search`/`web_search`, ...) | Tool-specific inputs (`fetch`/`search` accept every rho alias spelling) |
 | `*` | Universal fallback for unmatched surfaces |
 
 ```toml

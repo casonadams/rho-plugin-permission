@@ -60,6 +60,36 @@ fn wildcard_matching() {
 }
 
 #[test]
+fn fd_and_rg_tools_are_baseline_allowed_with_path_checks() {
+    // Baseline-allowed tool surfaces.
+    let config = rules("");
+    assert_eq!(
+        eval_req(&config, ("fd", &json!({"pattern": "main"})), workspace()),
+        Decision::Allow
+    );
+    assert_eq!(
+        eval_req(&config, ("rg", &json!({"pattern": "todo", "path": "src"})), workspace()),
+        Decision::Allow
+    );
+    // Their path argument is checked: outside the workspace asks.
+    assert_eq!(
+        eval_req(&config, ("rg", &json!({"pattern": "x", "path": "/etc"})), workspace()),
+        Decision::Ask
+    );
+    // Path deny rules govern them across tools.
+    let config = rules(
+        r#"
+[permission.path]
+"*.env*" = { action = "deny", reason = "secrets" }
+"#,
+    );
+    assert_eq!(
+        eval_req(&config, ("rg", &json!({"pattern": "key", "path": ".env"})), workspace()),
+        Decision::Deny("secrets".to_string())
+    );
+}
+
+#[test]
 fn path_module_normalization_and_containment() {
     let ws = Path::new("/ws");
     assert!(path::is_safe_system_path("/dev/null"));
@@ -109,6 +139,8 @@ fn baseline_rules_match_inspection_commands() {
     assert!(baseline::is_baseline_tool("ls"));
     assert!(baseline::is_baseline_tool("fetch"));
     assert!(baseline::is_baseline_tool("search"));
+    assert!(baseline::is_baseline_tool("fd"));
+    assert!(baseline::is_baseline_tool("rg"));
     assert!(!baseline::is_baseline_tool("unknown_tool"));
 
     assert!(baseline::is_baseline_bash("git status"));

@@ -2,8 +2,8 @@ use crate::matcher::expand_home;
 use serde_json::Value;
 use std::path::{Component, Path, PathBuf};
 
-pub const READ_ONLY_PATH_TOOLS: &[&str] = &["read", "grep", "find", "ls"];
-pub const PATH_BEARING_TOOLS: &[&str] = &["read", "write", "edit", "grep", "find", "ls"];
+pub const READ_ONLY_PATH_TOOLS: &[&str] = &["read", "grep", "find", "ls", "fd", "rg"];
+pub const PATH_BEARING_TOOLS: &[&str] = &["read", "grep", "find", "ls", "fd", "rg", "write", "edit"];
 pub const SAFE_SYSTEM_PATHS: &[&str] = &["/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr"];
 
 pub fn is_safe_system_path(path: &str) -> bool {
